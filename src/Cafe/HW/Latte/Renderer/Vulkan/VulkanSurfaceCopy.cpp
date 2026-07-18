@@ -228,13 +228,13 @@ VKRObjectRenderPass* VulkanRenderer::copySurface_createRenderpass(VkCopySurfaceS
 
 	if (state.destinationTexture->isDepth)
 	{
-		attachmentInfo.depthAttachment.viewObj = ((LatteTextureViewVk*)state.destinationTexture->baseView)->GetViewRGBA();
+		attachmentInfo.depthAttachment.viewObj = ((LatteTextureViewVk*)state.destinationTexture->baseView)->GetAttachmentView();
 		attachmentInfo.depthAttachment.format = state.destinationTexture->GetFormat();
 		attachmentInfo.depthAttachment.hasStencil = state.destinationTexture->hasStencil;
 	}
 	else
 	{
-		attachmentInfo.colorAttachment[0].viewObj = ((LatteTextureViewVk*)state.destinationTexture->baseView)->GetViewRGBA();
+		attachmentInfo.colorAttachment[0].viewObj = ((LatteTextureViewVk*)state.destinationTexture->baseView)->GetAttachmentView();
 		attachmentInfo.colorAttachment[0].format = state.destinationTexture->GetFormat();
 	}
 

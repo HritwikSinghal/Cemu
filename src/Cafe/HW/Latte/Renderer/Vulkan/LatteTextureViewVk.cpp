@@ -90,19 +90,13 @@ LatteTextureViewVk::~LatteTextureViewVk()
 		delete m_fallbackCache;
 		m_fallbackCache = nullptr;
 	}
+
+	if (m_attachmentView)
+		VulkanRenderer::GetInstance()->ReleaseDestructibleObject(m_attachmentView);
 }
 
-VKRObjectTextureView* LatteTextureViewVk::CreateView(uint32 gpuSamplerSwizzle)
+VKRObjectTextureView* LatteTextureViewVk::CreateView(uint32 gpuSamplerSwizzle, bool useIdentityComponents)
 {
-	uint32 compSelR = (gpuSamplerSwizzle >> 16) & 0x7;
-	uint32 compSelG = (gpuSamplerSwizzle >> 19) & 0x7;
-	uint32 compSelB = (gpuSamplerSwizzle >> 22) & 0x7;
-	uint32 compSelA = (gpuSamplerSwizzle >> 25) & 0x7;
-	compSelR = LatteTextureVk_AdjustTextureCompSel(format, compSelR);
-	compSelG = LatteTextureVk_AdjustTextureCompSel(format, compSelG);
-	compSelB = LatteTextureVk_AdjustTextureCompSel(format, compSelB);
-	compSelA = LatteTextureVk_AdjustTextureCompSel(format, compSelA);
-
 	VkImageViewCreateInfo viewInfo{};
 	viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
 	viewInfo.image = GetBaseImage()->GetImageObj()->m_image;
@@ -126,22 +120,42 @@ VKRObjectTextureView* LatteTextureViewVk::CreateView(uint32 gpuSamplerSwizzle)
 		viewInfo.subresourceRange.layerCount = this->numSlice;
 	}
 
-	static const VkComponentSwizzle swizzle[] =
+	if (useIdentityComponents)
 	{
-		VK_COMPONENT_SWIZZLE_R,
-		VK_COMPONENT_SWIZZLE_G,
-		VK_COMPONENT_SWIZZLE_B,
-		VK_COMPONENT_SWIZZLE_A,
-		VK_COMPONENT_SWIZZLE_ZERO,
-		VK_COMPONENT_SWIZZLE_ONE,
-		VK_COMPONENT_SWIZZLE_ZERO,
-		VK_COMPONENT_SWIZZLE_ZERO
-	};
+		// views bound as framebuffer attachments must not carry the sampler component remap; identity is the only valid mapping (VUID-VkFramebufferCreateInfo-pAttachments-00884)
+		viewInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+		viewInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+		viewInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+		viewInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+	}
+	else
+	{
+		uint32 compSelR = (gpuSamplerSwizzle >> 16) & 0x7;
+		uint32 compSelG = (gpuSamplerSwizzle >> 19) & 0x7;
+		uint32 compSelB = (gpuSamplerSwizzle >> 22) & 0x7;
+		uint32 compSelA = (gpuSamplerSwizzle >> 25) & 0x7;
+		compSelR = LatteTextureVk_AdjustTextureCompSel(format, compSelR);
+		compSelG = LatteTextureVk_AdjustTextureCompSel(format, compSelG);
+		compSelB = LatteTextureVk_AdjustTextureCompSel(format, compSelB);
+		compSelA = LatteTextureVk_AdjustTextureCompSel(format, compSelA);
 
-	viewInfo.components.r = swizzle[compSelR];
-	viewInfo.components.g = swizzle[compSelG];
-	viewInfo.components.b = swizzle[compSelB];
-	viewInfo.components.a = swizzle[compSelA];
+		static const VkComponentSwizzle swizzle[] =
+		{
+			VK_COMPONENT_SWIZZLE_R,
+			VK_COMPONENT_SWIZZLE_G,
+			VK_COMPONENT_SWIZZLE_B,
+			VK_COMPONENT_SWIZZLE_A,
+			VK_COMPONENT_SWIZZLE_ZERO,
+			VK_COMPONENT_SWIZZLE_ONE,
+			VK_COMPONENT_SWIZZLE_ZERO,
+			VK_COMPONENT_SWIZZLE_ZERO
+		};
+
+		viewInfo.components.r = swizzle[compSelR];
+		viewInfo.components.g = swizzle[compSelG];
+		viewInfo.components.b = swizzle[compSelB];
+		viewInfo.components.a = swizzle[compSelA];
+	}
 
 	VkImageView view;
 	if (vkCreateImageView(m_device, &viewInfo, nullptr, &view) != VK_SUCCESS)
@@ -151,8 +165,17 @@ VKRObjectTextureView* LatteTextureViewVk::CreateView(uint32 gpuSamplerSwizzle)
 }
 
 VKRObjectTextureView* LatteTextureViewVk::GetViewRGBA()
-{ 
+{
 	return GetSamplerView(0x06880000); // RGBA swizzle
+}
+
+VKRObjectTextureView* LatteTextureViewVk::GetAttachmentView()
+{
+	// sampler views may carry a per-format component remap (LatteTextureVk_AdjustTextureCompSel, e.g. R8 replicates R to GBA)
+	// but rendering into a swizzled attachment is invalid and hangs the GPU on Intel Xe2/Xe3 (see cemu-project/Cemu#1856)
+	if (!m_attachmentView)
+		m_attachmentView = CreateView(0, true);
+	return m_attachmentView;
 }
 
 VKRObjectTextureView* LatteTextureViewVk::GetSamplerView(uint32 gpuSamplerSwizzle)
