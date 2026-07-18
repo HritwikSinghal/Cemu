@@ -1,0 +1,193 @@
+name: Deploy fork release (Linux)
+
+# Fork-only release path, deliberately separate from the inherited
+# deploy_release.yml + determine_release_version.yml pair:
+#
+#   * determine_release_version.yml derives the next version by bumping the
+#     newest tag returned by the GitHub releases API for THIS repo and exits 1
+#     when there are none, so it can never produce a first release on a fork.
+#   * Its regex (^v[0-9]+\.[0-9]+(-[0-9]+)?$) also rejects the -perfN suffix
+#     this fork uses to stay distinguishable from the upstream release it is
+#     based on.
+#   * deploy_release.yml builds the full Windows/macOS/ARM matrix, which this
+#     fork does not ship or test.
+#
+# Living in its own file also means upstream merges never conflict with it.
+
+on:
+  push:
+    tags:
+      - 'v*-perf*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and release, e.g. v2.6-perf1'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  VCPKG_ROOT: "${{github.workspace}}/dependencies/vcpkg"
+  VCPKG_BINARY_SOURCES: 'clear;nuget,GitHub,readwrite'
+  VCPKG_FORCE_DOWNLOADED_BINARIES: true
+
+jobs:
+  release:
+    name: Build Linux x64 and draft release
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Resolve tag and version
+        id: version
+        # RAW_TAG is passed through the environment rather than interpolated into
+        # the script: a tag name is attacker-controlled text, and ${{ }} inside a
+        # run block would splice it into the shell. Every later use of these
+        # outputs is safe because the regex below constrains them to
+        # digits/dots/dashes before they are ever interpolated.
+        env:
+          RAW_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          TAG="$RAW_TAG"
+          # vMAJOR.MINOR-suffix. The suffix is mandatory: it is what stops a fork
+          # build from reporting the same version string as upstream's release of
+          # the same major.minor -- see EMULATOR_VERSION_SUFFIX in CMakeLists.txt.
+          if [[ ! "$TAG" =~ ^v([0-9]+)\.([0-9]+)(-[A-Za-z0-9._]+)$ ]]; then
+            echo "::error::Tag '$TAG' must look like v2.6-perf1 (vMAJOR.MINOR-suffix, suffix required)"
+            exit 1
+          fi
+          {
+            echo "tag=$TAG"
+            echo "version=${TAG#v}"
+            echo "major=${BASH_REMATCH[1]}"
+            echo "minor=${BASH_REMATCH[2]}"
+            echo "suffix=${BASH_REMATCH[3]}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.version.outputs.tag }}
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install system dependencies
+        run: |
+          sudo apt update -qq
+          sudo apt install -y clang-15 cmake freeglut3-dev libgcrypt20-dev \
+            libglm-dev libgtk-3-dev libpulse-dev libsecret-1-dev libsystemd-dev \
+            libudev-dev nasm ninja-build libbluetooth-dev appstream zip
+
+      - name: Bootstrap vcpkg
+        run: bash ./dependencies/vcpkg/bootstrap-vcpkg.sh
+
+      - name: Setup NuGet credentials for vcpkg
+        shell: bash
+        run: |
+          mono `./dependencies/vcpkg/vcpkg fetch nuget | tail -n 1` \
+            sources add \
+            -source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" \
+            -storepasswordincleartext \
+            -name "GitHub" \
+            -username "${{ github.repository_owner }}" \
+            -password "${{ secrets.GITHUB_TOKEN }}"
+          mono `./dependencies/vcpkg/vcpkg fetch nuget | tail -n 1` \
+            setapikey "${{ secrets.GITHUB_TOKEN }}" \
+            -source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=release \
+            -DEMULATOR_VERSION_MAJOR=${{ steps.version.outputs.major }} \
+            -DEMULATOR_VERSION_MINOR=${{ steps.version.outputs.minor }} \
+            -DEMULATOR_VERSION_SUFFIX=${{ steps.version.outputs.suffix }} \
+            -DCMAKE_C_COMPILER=/usr/bin/clang-15 \
+            -DCMAKE_CXX_COMPILER=/usr/bin/clang++-15 \
+            -G Ninja -DCMAKE_MAKE_PROGRAM=/usr/bin/ninja
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Verify the binary reports the fork version
+        run: |
+          # Guards against the version defines silently not reaching the build,
+          # which would ship a binary indistinguishable from upstream.
+          if ! strings bin/Cemu_release | grep -qF "Cemu ${{ steps.version.outputs.version }}"; then
+            echo "::error::bin/Cemu_release does not contain 'Cemu ${{ steps.version.outputs.version }}'"
+            exit 1
+          fi
+          echo "OK: binary reports Cemu ${{ steps.version.outputs.version }}"
+
+      # appimage.sh consumes bin/Cemu (not Cemu_release) and emits
+      # artifacts/Cemu-<short sha>-x86_64.AppImage
+      - name: Prepare binary
+        run: mv bin/Cemu_release bin/Cemu
+
+      # Tolerated rather than fatal: appimage.sh pins exact library sonames
+      # (libffi.so.7, libpcre.so.3, ...) that drift as the runner image is
+      # updated. The zip is the artifact that must exist; a missing AppImage is
+      # caught by a human because the release is created as a draft.
+      - name: Build AppImage
+        id: appimage
+        continue-on-error: true
+        run: |
+          export LD_LIBRARY_PATH="/usr/local/lib:$LD_LIBRARY_PATH"
+          export DEPLOY_GTK_VERSION=3
+          dist/linux/appimage.sh X64
+
+      - name: Package artifacts
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          mkdir -p upload
+          # bin/ carries the shipped resources (gameProfiles, resources, ...)
+          # alongside the executable, matching upstream's release layout
+          cp -R ./bin "./Cemu_$VERSION"
+          zip -9 -r "upload/cemu-$VERSION-linux-x64.zip" "Cemu_$VERSION"
+          rm -r "./Cemu_$VERSION"
+          if compgen -G 'artifacts/Cemu-*-x86_64.AppImage' > /dev/null; then
+            mv artifacts/Cemu-*-x86_64.AppImage "upload/Cemu-$VERSION-x86_64.AppImage"
+          else
+            echo "::warning::AppImage was not produced (appimage.sh outcome: ${{ steps.appimage.outcome }}); releasing the zip only"
+          fi
+          ls -la upload/
+
+      - name: Generate release notes
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="${{ steps.version.outputs.tag }}"
+          PREV=$(git tag -l 'v*-perf*' --sort=-v:refname | grep -vFx "$TAG" | head -n 1)
+          {
+            echo "Performance-focused fork of Cemu targeting Intel integrated GPUs"
+            echo "(Panther Lake / Xe3 with the Mesa ANV Vulkan driver on Linux)."
+            echo
+            echo "Reports its version as \`Cemu $VERSION\` so it cannot be confused"
+            echo "with an upstream release. Linux x64 only -- for Windows or macOS use"
+            echo "[upstream Cemu](https://github.com/cemu-project/Cemu/releases)."
+            echo
+            echo "> Note: the AppImage inherits upstream's self-update target, so"
+            echo "> letting it update in place will replace this fork build with an"
+            echo "> upstream CI build. Re-download from here instead."
+            echo
+            if [ -n "$PREV" ]; then
+              echo "## Changes since $PREV"
+              echo
+              git log --no-merges --format='- %s' "$PREV..$TAG"
+            else
+              echo "## Fork changes"
+              echo
+              echo "See the \"About this fork\" section of the README, plus issues #1"
+              echo "(profiling instrumentation) and #2 (optimizations)."
+            fi
+          } > notes.md
+          cat notes.md
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --draft \
+            --title "Cemu ${{ steps.version.outputs.version }}" \
+            --notes-file notes.md \
+            upload/*
