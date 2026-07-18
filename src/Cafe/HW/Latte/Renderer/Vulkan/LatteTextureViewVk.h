@@ -13,6 +13,7 @@ public:
 	uint64 GetUniqueId() const { return m_uniqueId; };
 	VKRObjectTextureView* GetViewRGBA();
 	VKRObjectTextureView* GetSamplerView(uint32 gpuSamplerSwizzle);
+	VKRObjectTextureView* GetAttachmentView(); // identity-component view for framebuffer attachments (VUID-VkFramebufferCreateInfo-pAttachments-00884 forbids swizzled attachments)
 	VkSampler GetDefaultTextureSampler(bool useLinearTexFilter);
 	VkFormat GetFormat() const { return m_format; }
 
@@ -23,7 +24,7 @@ public:
 
 private:
 	VkImageViewType GetImageViewTypeFromGX2Dim(Latte::E_DIM dim);
-	VKRObjectTextureView* CreateView(uint32 gpuSamplerSwizzle);
+	VKRObjectTextureView* CreateView(uint32 gpuSamplerSwizzle, bool useIdentityComponents = false);
 
 	// each texture view holds one Vulkan image view per swizzle mask. Image views are only instantiated when requested via GetViewRGBA/GetSamplerView
 	// since a large majority of texture views will only have 1 or 2 instantiated image views, we use a small fixed-size cache
@@ -35,7 +36,8 @@ private:
 	VKRObjectTextureView* m_smallCacheView0 = {};
 	VKRObjectTextureView* m_smallCacheView1 = {};
 	std::unordered_map<uint32, VKRObjectTextureView*>* m_fallbackCache{};
-	
+	VKRObjectTextureView* m_attachmentView = {}; // separate from the sampler-view caches, since attachment views ignore the sampler swizzle
+
 	VkDevice m_device;
 	VkFormat m_format;
 	std::vector<struct VkDescriptorSetInfo*> list_descriptorSets; // list of descriptors sets referencing this view
