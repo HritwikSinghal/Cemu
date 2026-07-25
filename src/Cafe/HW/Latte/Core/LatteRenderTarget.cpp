@@ -437,6 +437,7 @@ Latte::E_GX2SURFFMT LatteMRT::GetDepthBufferFormat(const LatteContextRegister& l
 
 bool LatteMRT::UpdateCurrentFBO()
 {
+	LATTE_PERF_SCOPE(tmrFboUpdate);
 	catchOpenGLError();
 	sLatteRenderTargetState.rtUpdateListCount = 0;
 	// combine color buffer mask with pixel output mask from pixel shader

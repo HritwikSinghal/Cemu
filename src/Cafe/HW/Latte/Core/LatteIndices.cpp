@@ -646,6 +646,7 @@ void LatteIndices_alternativeCalculateIndexMax(const void* indexData, LatteIndex
 
 void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32 count, LattePrimitiveMode primitiveMode, uint32& indexMax, Renderer::INDEX_TYPE& renderIndexType, uint32& outputCount, Renderer::IndexAllocation& indexAllocation)
 {
+	LATTE_PERF_SCOPE(tmrIndexDecode);
 	// what this should do:
 	// [x] use fast SIMD-based index decoding
 	// [x] unpack QUAD indices to triangle indices
@@ -660,6 +661,7 @@ void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32
 	});
 	if (cacheEntry != LatteIndexCache.entry.end())
 	{
+		LATTE_PERF_COUNT(cntIndexCacheHit);
 		indexMax = cacheEntry->indexMax;
 		renderIndexType = cacheEntry->renderIndexType;
 		outputCount = cacheEntry->outputCount;
@@ -667,6 +669,7 @@ void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32
 		cacheEntry->lastUsed = LatteIndices_GetNextUsageIndex();
 		return;
 	}
+	LATTE_PERF_COUNT(cntIndexCacheMiss);
 
 	outputCount = 0;
 	if (indexType == LatteIndexType::AUTO)
@@ -844,6 +847,7 @@ void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32
 		LatteIndices_alternativeCalculateIndexMax(indexData, indexType, count, indexMax);
 	}
 	g_renderer->indexData_uploadIndexMemory(indexAllocation);
+	LATTE_PERF_ADD(cntBytesIndexUpload, indexOutputSize);
 	performanceMonitor.cycle[performanceMonitor.cycleIndex].indexDataUploaded += indexOutputSize;
 	// get least recently used cache entry
 	auto lruEntry = std::min_element(LatteIndexCache.entry.begin(), LatteIndexCache.entry.end(), [](const auto& a, const auto& b)

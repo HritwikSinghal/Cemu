@@ -292,6 +292,7 @@ PipelineInfo* VulkanRenderer::draw_getOrCreateGraphicsPipeline(uint32 indexCount
 	}
 	//draw_debugPipelineHashState();
 
+	LATTE_PERF_COUNT(cntPipelineMiss);
 	return draw_createGraphicsPipeline(indexCount);
 }
 
@@ -446,6 +447,7 @@ void VulkanRenderer::uniformData_updateUniformVars(uint32 shaderStageIndex, Latt
 			}
 		}
 	}
+	LATTE_PERF_ADD(cntBytesUniformUpload, shader->uniform.uniformRangeSize);
 	dynamicOffsetInfo.uniformVarBufferOffset[shaderStageIndex] = uniformData_uploadUniformDataBufferGetOffset({(uint8*)uniformBuf, shader->uniform.uniformRangeSize});
 }
 
@@ -493,6 +495,7 @@ void VulkanRenderer::uniformData_updateUniformVarsIncremental(uint32 shaderStage
 	}
 	if (hasChange)
 	{
+		LATTE_PERF_ADD(cntBytesUniformUpload, shader->uniform.uniformRangeSize);
 		dynamicOffsetInfo.uniformVarBufferOffset[shaderStageIndex] = uniformData_uploadUniformDataBufferGetOffset({(uint8*)uniformBuf, shader->uniform.uniformRangeSize});
 		stageUniformModifiedMask |= (1 << shaderStageIndex);
 	}
@@ -584,6 +587,8 @@ VkDescriptorSetInfo* VulkanRenderer::draw_getOrCreateDescriptorSet(PipelineInfo*
 	const auto it = ds_cache.find(stateHash);
 	if (it != ds_cache.cend())
 		return it->second;
+
+	LATTE_PERF_COUNT(cntDescSetMiss);
 
 	VkDescriptorSetLayout descriptor_set_layout;
 	switch (shader->shaderType)
@@ -1186,6 +1191,7 @@ bool s_syncOnNextDraw = false;
 
 void VulkanRenderer::draw_setRenderPass()
 {
+	LATTE_PERF_SCOPE(tmrRenderpass);
 	CachedFBOVk* fboVk = m_state.activeFBO;
 	// note - pixel self dependency can be handled via feedback_loop extension
 	// vertex/geometry self dependency needs renderpass split
@@ -1261,6 +1267,7 @@ void VulkanRenderer::draw_endRenderPass()
 {
 	if (!m_state.activeRenderpassFBO)
 		return;
+	LATTE_PERF_SCOPE(tmrRenderpass);
 	if (m_featureControl.deviceExtensions.dynamic_rendering)
 		vkCmdEndRenderingKHR(m_state.currentCommandBuffer);
 	else
@@ -1354,6 +1361,7 @@ void VulkanRenderer::draw_execute_first(uint32 baseVertex, uint32 baseInstance, 
 	{
 		return;
 	}
+	LATTE_PERF_COUNT(cntDrawsFirst);
 
 	// fast clear color as depth
 	if (LatteGPUState.contextNew.GetSpecialStateValues()[8] != 0)
@@ -1376,12 +1384,15 @@ void VulkanRenderer::draw_execute_first(uint32 baseVertex, uint32 baseInstance, 
 	LatteDecompilerShader* pixelShader = LatteSHRC_GetActivePixelShader();
 	LatteDecompilerShader* geometryShader = LatteSHRC_GetActiveGeometryShader();
 
-	if (vertexShader)
-		uniformData_updateUniformVars(VulkanRendererConst::SHADER_STAGE_INDEX_VERTEX, vertexShader, s_vkUniformDataVS);
-	if (pixelShader)
-		uniformData_updateUniformVars(VulkanRendererConst::SHADER_STAGE_INDEX_FRAGMENT, pixelShader, s_vkUniformDataPS);
-	if (geometryShader)
-		uniformData_updateUniformVars(VulkanRendererConst::SHADER_STAGE_INDEX_GEOMETRY, geometryShader, s_vkUniformDataGS);
+	{
+		LATTE_PERF_SCOPE(tmrUniformUpdate);
+		if (vertexShader)
+			uniformData_updateUniformVars(VulkanRendererConst::SHADER_STAGE_INDEX_VERTEX, vertexShader, s_vkUniformDataVS);
+		if (pixelShader)
+			uniformData_updateUniformVars(VulkanRendererConst::SHADER_STAGE_INDEX_FRAGMENT, pixelShader, s_vkUniformDataPS);
+		if (geometryShader)
+			uniformData_updateUniformVars(VulkanRendererConst::SHADER_STAGE_INDEX_GEOMETRY, geometryShader, s_vkUniformDataGS);
+	}
 	// store where the read pointer should go after command buffer execution
 	m_cmdBufferUniformRingbufIndices[m_commandBufferIndex] = m_uniformVarBufferWriteIndex;
 
@@ -1436,7 +1447,11 @@ void VulkanRenderer::draw_execute_first(uint32 baseVertex, uint32 baseInstance, 
 		LatteBufferCache_Sync(indexMax + baseVertex, baseInstance, instanceCount, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, stageUniformModifiedMask);
 	}
 
-	PipelineInfo* pipeline_info = draw_getOrCreateGraphicsPipeline(count);
+	PipelineInfo* pipeline_info;
+	{
+		LATTE_PERF_SCOPE(tmrPipelineLookup);
+		pipeline_info = draw_getOrCreateGraphicsPipeline(count);
+	}
 	m_state.activePipelineInfo = pipeline_info;
 
 	auto vkObjPipeline = pipeline_info->m_vkrObjPipeline;
@@ -1444,11 +1459,15 @@ void VulkanRenderer::draw_execute_first(uint32 baseVertex, uint32 baseInstance, 
 	{
 		// invalid/uninitialized pipeline
 		m_state.activeVertexDS = nullptr;
+		LATTE_PERF_COUNT(cntAsyncSkippedDraws);
 		return;
 	}
 
 	VkDescriptorSetInfo *vertexDS = nullptr, *pixelDS = nullptr, *geometryDS = nullptr;
-	draw_prepareDescriptorSets(pipeline_info, vertexDS, pixelDS, geometryDS);
+	{
+		LATTE_PERF_SCOPE(tmrDescriptorSets);
+		draw_prepareDescriptorSets(pipeline_info, vertexDS, pixelDS, geometryDS);
+	}
 	m_state.activeVertexDS = vertexDS;
 	m_state.activePixelDS = pixelDS;
 	m_state.activeGeometryDS = geometryDS;
@@ -1521,6 +1540,7 @@ void VulkanRenderer::draw_execute_continued(uint32 baseVertex, uint32 baseInstan
 	{
 		return;
 	}
+	LATTE_PERF_COUNT(cntDrawsFast);
 
 	// fast clear color as depth
 	if (LatteGPUState.contextNew.GetSpecialStateValues()[8] != 0)
@@ -1544,12 +1564,15 @@ void VulkanRenderer::draw_execute_continued(uint32 baseVertex, uint32 baseInstan
 	LatteDecompilerShader* geometryShader = LatteSHRC_GetActiveGeometryShader();
 
 	uint8 stageUniformModifiedMask = 0; // one bit for each stage (using SHADER_STAGE_INDEX_* as bit index). Set if any uniform data has been modified and needs to be reuploaded
-	if (vertexShader)
-		uniformData_updateUniformVarsIncremental(VulkanRendererConst::SHADER_STAGE_INDEX_VERTEX, vertexShader, stageUniformModifiedMask, s_vkUniformDataVS, drawcallContext.aluConstVSDirty, drawcallContext.vsUniformBufferDirtyMask);
-	if (pixelShader)
-		uniformData_updateUniformVarsIncremental(VulkanRendererConst::SHADER_STAGE_INDEX_FRAGMENT, pixelShader, stageUniformModifiedMask, s_vkUniformDataPS, drawcallContext.aluConstPSDirty, drawcallContext.psUniformBufferDirtyMask);
-	if (geometryShader)
-		uniformData_updateUniformVarsIncremental(VulkanRendererConst::SHADER_STAGE_INDEX_GEOMETRY, geometryShader, stageUniformModifiedMask, s_vkUniformDataGS, false, drawcallContext.gsUniformBufferDirtyMask);
+	{
+		LATTE_PERF_SCOPE(tmrUniformUpdate);
+		if (vertexShader)
+			uniformData_updateUniformVarsIncremental(VulkanRendererConst::SHADER_STAGE_INDEX_VERTEX, vertexShader, stageUniformModifiedMask, s_vkUniformDataVS, drawcallContext.aluConstVSDirty, drawcallContext.vsUniformBufferDirtyMask);
+		if (pixelShader)
+			uniformData_updateUniformVarsIncremental(VulkanRendererConst::SHADER_STAGE_INDEX_FRAGMENT, pixelShader, stageUniformModifiedMask, s_vkUniformDataPS, drawcallContext.aluConstPSDirty, drawcallContext.psUniformBufferDirtyMask);
+		if (geometryShader)
+			uniformData_updateUniformVarsIncremental(VulkanRendererConst::SHADER_STAGE_INDEX_GEOMETRY, geometryShader, stageUniformModifiedMask, s_vkUniformDataGS, false, drawcallContext.gsUniformBufferDirtyMask);
+	}
 	// store where the read pointer should go after command buffer execution
 	m_cmdBufferUniformRingbufIndices[m_commandBufferIndex] = m_uniformVarBufferWriteIndex;
 
@@ -1605,27 +1628,33 @@ void VulkanRenderer::draw_execute_continued(uint32 baseVertex, uint32 baseInstan
 
 	m_state.descriptorSetsChanged = false;
 	PipelineInfo* pipeline_info = m_state.activePipelineInfo;
-	// recalculate the part of the pipeline hash that can change during fast draws
-	if (m_state.activePipelineInfo->minimalStateHash != draw_calculateMinimalGraphicsPipelineHash(vertexShader->compatibleFetchShader, LatteGPUState.contextNew)) [[unlikely]]
 	{
-		// pipeline changed
-		pipeline_info = draw_getOrCreateGraphicsPipeline(count);
-		m_state.activePipelineInfo = pipeline_info;
-		// if the pipeline is changed then we also need to get the descriptor sets
-		draw_prepareDescriptorSets(pipeline_info, m_state.activeVertexDS, m_state.activePixelDS, m_state.activeGeometryDS);
-		m_state.descriptorSetsChanged = true;
-		stageUniformModifiedMask = 0x7;
-	}
-	else
-	{
-		// sanity check that we are using the right pipeline
-#ifdef CEMU_DEBUG_ASSERT
-		auto pipeline_info2 = draw_getOrCreateGraphicsPipeline(count);
-		if (pipeline_info != pipeline_info2)
+		LATTE_PERF_SCOPE(tmrPipelineLookup);
+		// recalculate the part of the pipeline hash that can change during fast draws
+		if (m_state.activePipelineInfo->minimalStateHash != draw_calculateMinimalGraphicsPipelineHash(vertexShader->compatibleFetchShader, LatteGPUState.contextNew)) [[unlikely]]
 		{
-			cemu_assert_debug(false);
+			// pipeline changed
+			pipeline_info = draw_getOrCreateGraphicsPipeline(count);
+			m_state.activePipelineInfo = pipeline_info;
+			// if the pipeline is changed then we also need to get the descriptor sets
+			{
+				LATTE_PERF_SCOPE(tmrDescriptorSets);
+				draw_prepareDescriptorSets(pipeline_info, m_state.activeVertexDS, m_state.activePixelDS, m_state.activeGeometryDS);
+			}
+			m_state.descriptorSetsChanged = true;
+			stageUniformModifiedMask = 0x7;
 		}
+		else
+		{
+			// sanity check that we are using the right pipeline
+#ifdef CEMU_DEBUG_ASSERT
+			auto pipeline_info2 = draw_getOrCreateGraphicsPipeline(count);
+			if (pipeline_info != pipeline_info2)
+			{
+				cemu_assert_debug(false);
+			}
 #endif
+		}
 	}
 
 	auto vkObjPipeline = pipeline_info->m_vkrObjPipeline;
@@ -1633,6 +1662,7 @@ void VulkanRenderer::draw_execute_continued(uint32 baseVertex, uint32 baseInstan
 	{
 		// invalid/uninitialized pipeline
 		//m_state.activeVertexDS = nullptr;
+		LATTE_PERF_COUNT(cntAsyncSkippedDraws);
 		return;
 	}
 
@@ -1825,6 +1855,9 @@ void VulkanRenderer::draw_endSequence()
 	m_recordedDrawcalls++;
 	if (m_recordedDrawcalls >= m_submitThreshold || hasReadback)
 	{
+		// the threshold-triggered submit needs no separate counter (computable from cntSubmits - cntSubmitsForced)
+		if (hasReadback)
+			LATTE_PERF_COUNT(cntSubmitsForced);
 		SubmitCommandBuffer();
 	}
 }

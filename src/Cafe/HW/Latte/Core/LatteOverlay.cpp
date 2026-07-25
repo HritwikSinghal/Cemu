@@ -113,6 +113,24 @@ void LatteOverlay_renderOverlay(ImVec2& position, ImVec2& pivot, sint32 directio
 				ImGui::Text("--- Debug info ---");
 				ImGui::Text("IndexUploadPerFrame: %dKB", (performanceMonitor.stats.indexDataUploadPerFrame+1023)/1024);
 				ImGui::Text("SHCSets: %d / %d", g_shaderStateCacheSetCount.load(), g_shaderStateCacheSetAuxCount.load());
+				// bottleneck profiling stats (values are from the previous frame)
+				auto& bn = performanceMonitor.bottleneck;
+				auto tUs = [](LattePerfNestingTimer& t) -> uint32 { return (uint32)PPCTimer_tscToMicroseconds(t.getPreviousFrameValue()); };
+				auto cnt = [](const LattePerfStatFrameCounter& c) -> uint32 { return (uint32)c.getPreviousFrameValue(); };
+				ImGui::Text("--- Bottleneck stats (per frame) ---");
+				// "retired" because these nanoseconds are attributed to the frame in which the command
+				// buffer's fence happens to retire, not the frame that submitted the work -- see the
+				// accumulation site in VulkanRenderer::ProcessFinishedCommandBuffers for details
+				ImGui::Text("GPU busy (retired): %.2lfms", (double)bn.gpuBusyNsPrevFrame / 1000000.0);
+				ImGui::Text("Draws: %u first / %u fast, asyncSkip %u", cnt(bn.cntDrawsFirst), cnt(bn.cntDrawsFast), cnt(bn.cntAsyncSkippedDraws));
+				ImGui::Text("SeqEnd: tex %u, ctxReg %u", cnt(bn.cntSeqEndTexture), cnt(bn.cntSeqEndContextReg));
+				ImGui::Text("CPU us: shader %u fbo %u texBind %u texHash %u", tUs(bn.tmrShaderUpdate), tUs(bn.tmrFboUpdate), tUs(bn.tmrTextureUpdate), tUs(bn.tmrTextureHashTick));
+				ImGui::Text("  texUpl %u unif %u idx %u bufSync %u", tUs(bn.tmrTextureUpload), tUs(bn.tmrUniformUpdate), tUs(bn.tmrIndexDecode), tUs(bn.tmrBufferCacheSync));
+				ImGui::Text("  pipe %u descSet %u rpass %u submit %u", tUs(bn.tmrPipelineLookup), tUs(bn.tmrDescriptorSets), tUs(bn.tmrRenderpass), tUs(bn.tmrSubmit));
+				ImGui::Text("Waits us: gpu %u idleSpin %u guestFence %u", tUs(bn.tmrGpuWait), tUs(bn.tmrIdleSpin), tUs(bn.tmrFenceWait));
+				ImGui::Text("IdxCache: %u hit / %u miss, dsMiss %u pipeMiss %u", cnt(bn.cntIndexCacheHit), cnt(bn.cntIndexCacheMiss), cnt(bn.cntDescSetMiss), cnt(bn.cntPipelineMiss));
+				ImGui::Text("Upload KB: unif %u tex %u idx %u, texReloads %u (%u slices)", cnt(bn.cntBytesUniformUpload) >> 10, cnt(bn.cntBytesTextureUpload) >> 10, cnt(bn.cntBytesIndexUpload) >> 10, cnt(bn.cntTextureReloads), cnt(bn.cntTextureReloadSlices));
+				ImGui::Text("Submits: %u (%u forced), occQ %u, vsyncLate %uus", cnt(bn.cntSubmits), cnt(bn.cntSubmitsForced), cnt(bn.cntOcclusionQueries), cnt(bn.cntVsyncLateUs));
 				// backend specific info
 				g_renderer->AppendOverlayDebugInfo();
 			}

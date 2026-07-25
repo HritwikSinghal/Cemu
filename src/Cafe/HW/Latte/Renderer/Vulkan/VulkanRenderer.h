@@ -509,6 +509,7 @@ private:
 
 	void CreateCommandPool();
 	void CreateCommandBuffers();
+	void CreateGpuTimestampQueryPool();
 
 	void swapchain_createDescriptorSetLayout();
 
@@ -663,6 +664,13 @@ private:
 	std::array<VkFence, kCommandBufferPoolSize> m_cmdBufferFences;
 	std::array<VkCommandBuffer, kCommandBufferPoolSize> m_commandBuffers;
 	std::array<VkSemaphore, kCommandBufferPoolSize> m_commandBufferSemaphores;
+
+	// GPU timestamp queries for measuring per-command-buffer GPU busy time (see LattePerformanceMonitor)
+	bool m_gpuTimestampsSupported{false};
+	float m_gpuTimestampPeriodNs{1.0f}; // nanoseconds per timestamp tick (VkPhysicalDeviceLimits::timestampPeriod)
+	uint32 m_gpuTimestampValidBits{64};
+	VkQueryPool m_gpuTimestampQueryPool{VK_NULL_HANDLE};
+	std::array<bool, kCommandBufferPoolSize> m_cmdBufferHasTimestamps{};
 
 	VkSemaphore GetLastSubmittedCmdBufferSemaphore()
 	{

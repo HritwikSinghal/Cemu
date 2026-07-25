@@ -6,6 +6,7 @@
 #include "util/highresolutiontimer/HighResolutionTimer.h"
 #include "config/CemuConfig.h"
 #include "Cafe/CafeSystem.h"
+#include "Cafe/HW/Latte/Core/LattePerformanceMonitor.h"
 
 sint32 s_customVsyncFrequency = -1;
 
@@ -159,6 +160,13 @@ void LatteTiming_HandleTimedVsync()
 	uint64 currentTimer = HighResolutionTimer::now().getTick();
 	if( currentTimer >= LatteGPUState.timer_nextVSync )
 	{
+		if (g_lattePerfStatsEnabled)
+		{
+			// vsync fired late (this is a polled/emulated vsync, not a hardware interrupt) - track by how much
+			uint64 latenessTicks = currentTimer - LatteGPUState.timer_nextVSync;
+			uint64 latenessUs = HighResolutionTimer::ticksToMicroseconds(latenessTicks);
+			LATTE_PERF_ADD(cntVsyncLateUs, latenessUs);
+		}
 		if(!LatteTiming_IsUsingHostDrivenVSync())
 			LatteTiming_signalVsync();
 		// even if vsync is delegated to the host device, we still use this virtual vsync timer to check finished states

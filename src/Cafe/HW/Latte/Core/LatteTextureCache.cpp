@@ -2,6 +2,7 @@
 #include "Cafe/HW/Latte/Core/LatteDraw.h"
 #include "Cafe/HW/Latte/Core/LatteTexture.h"
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
+#include "Cafe/HW/Latte/Core/LattePerformanceMonitor.h"
 #include "Common/cpu_features.h"
 
 std::unordered_set<LatteTexture*> g_allTextures;
@@ -200,6 +201,8 @@ uint64 _botwLargeTexHax = 0;
 
 bool LatteTC_HasTextureChanged(LatteTexture* hostTexture, bool force)
 {
+	// periodic (frame-gated) texture change-detection hash check; timer accumulates across all textures checked this frame
+	LATTE_PERF_SCOPE(tmrTextureHashTick);
 	if (hostTexture->forceInvalidate)
 	{
 		force = true;

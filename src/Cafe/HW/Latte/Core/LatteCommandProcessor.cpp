@@ -174,6 +174,8 @@ uint32 LatteCP_readU32Deprc()
 		if ( TCL::TCLGPUReadRBWord(cmdWord) )
 			return cmdWord;
 
+		// ring buffer was empty on the check above, time the wait until new command data becomes available
+		LATTE_PERF_SCOPE(tmrIdleSpin);
 		g_renderer->NotifyLatteCommandProcessorIdle(); // let the renderer know in case it wants to flush any commands
 		performanceMonitor.gpuTime_idleTime.beginMeasuring();
 		// no command data available, spin in a busy loop for a bit then check again
@@ -472,6 +474,7 @@ LatteCMDPtr LatteCP_itWaitRegMem(LatteCMDPtr cmd, uint32 nWords)
 	{
 		// wait for memory address
 		performanceMonitor.gpuTime_fenceTime.beginMeasuring();
+		LATTE_PERF_SCOPE(tmrFenceWait);
 		while (true)
 		{
 			uint32 fenceMemValue = _swapEndianU32(*fencePtr);
@@ -1049,6 +1052,7 @@ void LatteCP_processCommandBuffer_continuousDrawPass(DrawPassContext& drawPassCt
 								(registerStart >= Latte::REGADDR::SQ_TEX_RESOURCE_WORD0_N_GS && registerStart < (Latte::REGADDR::SQ_TEX_RESOURCE_WORD0_N_GS + Latte::GPU_LIMITS::NUM_TEXTURES_PER_STAGE * 7)))
 							{
 								drawPassCtx.endDrawPass(); // texture updates end the current draw sequence
+								LATTE_PERF_COUNT(cntSeqEndTexture);
 							}
 							else if (registerStart >= mmSQ_VTX_ATTRIBUTE_BLOCK_START && registerEnd <= mmSQ_VTX_ATTRIBUTE_BLOCK_END)
 							{
@@ -1122,6 +1126,7 @@ void LatteCP_processCommandBuffer_continuousDrawPass(DrawPassContext& drawPassCt
 					if (hasChanged)
 					{
 						drawPassCtx.endDrawPass();
+						LATTE_PERF_COUNT(cntSeqEndContextReg);
 						drawPassCtx.PushCurrentCommandQueuePos(cmd, cmdStart, cmdEnd);
 						return;
 					}

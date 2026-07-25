@@ -789,6 +789,7 @@ VulkanRenderer::VulkanRenderer() : Renderer(RendererAPI::Vulkan)
 	QueryAvailableFormats();
 	CreateCommandPool();
 	CreateCommandBuffers();
+	CreateGpuTimestampQueryPool();
 	CreateDescriptorPool();
 	swapchain_createDescriptorSetLayout();
 
@@ -879,6 +880,9 @@ VulkanRenderer::~VulkanRenderer()
 
 	if(m_occlusionQueries.queryPool != VK_NULL_HANDLE)
 		vkDestroyQueryPool(m_logicalDevice, m_occlusionQueries.queryPool, nullptr);
+
+	if (m_gpuTimestampQueryPool != VK_NULL_HANDLE)
+		vkDestroyQueryPool(m_logicalDevice, m_gpuTimestampQueryPool, nullptr);
 
 	vkDestroyDescriptorSetLayout(m_logicalDevice, m_swapchainDescriptorSetLayout, nullptr);
 
@@ -1697,6 +1701,41 @@ void VulkanRenderer::CreateCommandBuffers()
 	}
 }
 
+void VulkanRenderer::CreateGpuTimestampQueryPool()
+{
+	VkPhysicalDeviceProperties properties{};
+	vkGetPhysicalDeviceProperties(m_physicalDevice, &properties);
+
+	uint32_t queueFamilyCount = 0;
+	vkGetPhysicalDeviceQueueFamilyProperties(m_physicalDevice, &queueFamilyCount, nullptr);
+	std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+	vkGetPhysicalDeviceQueueFamilyProperties(m_physicalDevice, &queueFamilyCount, queueFamilies.data());
+
+	uint32 timestampValidBits = 0;
+	if (m_indices.graphicsFamily >= 0 && (uint32_t)m_indices.graphicsFamily < queueFamilies.size())
+		timestampValidBits = queueFamilies[m_indices.graphicsFamily].timestampValidBits;
+
+	m_gpuTimestampsSupported = properties.limits.timestampComputeAndGraphics && timestampValidBits > 0;
+	if (!m_gpuTimestampsSupported)
+	{
+		cemuLog_log(LogType::Force, "Vulkan: GPU timestamp queries not supported by this device/queue. GPU busy time will not be measured");
+		return;
+	}
+
+	m_gpuTimestampPeriodNs = properties.limits.timestampPeriod;
+	m_gpuTimestampValidBits = timestampValidBits;
+
+	VkQueryPoolCreateInfo queryPoolCreateInfo{};
+	queryPoolCreateInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+	queryPoolCreateInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+	queryPoolCreateInfo.queryCount = kCommandBufferPoolSize * 2;
+	if (vkCreateQueryPool(m_logicalDevice, &queryPoolCreateInfo, nullptr, &m_gpuTimestampQueryPool) != VK_SUCCESS)
+	{
+		cemuLog_log(LogType::Force, "Vulkan: Failed to create GPU timestamp query pool");
+		m_gpuTimestampsSupported = false;
+	}
+}
+
 bool VulkanRenderer::IsSwapchainInfoValid(bool mainWindow) const
 {
 	auto& chainInfo = GetChainInfoPtr(mainWindow);
@@ -2139,6 +2178,17 @@ void VulkanRenderer::InitFirstCommandBuffer()
 	vkCmdSetViewport(m_state.currentCommandBuffer, 0, 1, &m_state.currentViewport);
 	vkCmdSetScissor(m_state.currentCommandBuffer, 0, 1, &m_state.currentScissorRect);
 
+	if (m_gpuTimestampsSupported && g_lattePerfStatsEnabled)
+	{
+		vkCmdResetQueryPool(m_state.currentCommandBuffer, m_gpuTimestampQueryPool, (uint32)m_commandBufferIndex * 2, 2);
+		vkCmdWriteTimestamp(m_state.currentCommandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, m_gpuTimestampQueryPool, (uint32)m_commandBufferIndex * 2);
+		m_cmdBufferHasTimestamps[m_commandBufferIndex] = true;
+	}
+	else
+	{
+		m_cmdBufferHasTimestamps[m_commandBufferIndex] = false;
+	}
+
 	m_state.resetCommandBufferState();
 }
 
@@ -2152,6 +2202,26 @@ void VulkanRenderer::ProcessFinishedCommandBuffers()
 		{
 			ProcessDestructionQueue();
 			m_uniformVarBufferReadIndex = m_cmdBufferUniformRingbufIndices[m_commandBufferSyncIndex];
+			if (m_cmdBufferHasTimestamps[m_commandBufferSyncIndex])
+			{
+				// fence is signaled, so the timestamp results are guaranteed to be available -> no wait bit needed
+				uint64 timestamps[2];
+				VkResult queryResult = vkGetQueryPoolResults(m_logicalDevice, m_gpuTimestampQueryPool, (uint32)m_commandBufferSyncIndex * 2, 2, sizeof(timestamps), timestamps, sizeof(uint64), VK_QUERY_RESULT_64_BIT);
+				if (queryResult == VK_SUCCESS)
+				{
+					uint64 validBitsMask = m_gpuTimestampValidBits >= 64 ? ~0ull : ((1ull << m_gpuTimestampValidBits) - 1);
+					uint64 t0 = timestamps[0] & validBitsMask;
+					uint64 t1 = timestamps[1] & validBitsMask;
+					uint64 elapsedTicks = (t1 - t0) & validBitsMask; // masking again handles wraparound of the valid bit range
+					// attributed to whichever CPU frame is current when this fence retires, not the frame that
+					// submitted the command buffer -- retirement can lag submission by a variable number of
+					// frames, so per-frame readings of this value jitter and should be read as a short rolling
+					// estimate rather than an exact per-frame GPU busy time
+					performanceMonitor.bottleneck.addGpuBusyNs((uint64)((double)elapsedTicks * (double)m_gpuTimestampPeriodNs));
+				}
+				// else VK_NOT_READY (shouldn't happen since the fence is signaled) -> just drop this sample
+				m_cmdBufferHasTimestamps[m_commandBufferSyncIndex] = false;
+			}
 			m_commandBufferSyncIndex = (m_commandBufferSyncIndex + 1) % m_commandBuffers.size();
 			memoryManager->cleanupBuffers(m_countCommandBufferFinished);
 			m_countCommandBufferFinished++;
@@ -2175,7 +2245,11 @@ void VulkanRenderer::WaitForNextFinishedCommandBuffer()
 {
 	cemu_assert_debug(m_commandBufferSyncIndex != m_commandBufferIndex);
 	// wait on least recently submitted command buffer
-	VkResult result = vkWaitForFences(m_logicalDevice, 1, &m_cmdBufferFences[m_commandBufferSyncIndex], true, UINT64_MAX);
+	VkResult result;
+	{
+		LATTE_PERF_SCOPE(tmrGpuWait);
+		result = vkWaitForFences(m_logicalDevice, 1, &m_cmdBufferFences[m_commandBufferSyncIndex], true, UINT64_MAX);
+	}
 	if (result == VK_TIMEOUT)
 	{
 		cemuLog_log(LogType::Force, "vkWaitForFences: Returned VK_TIMEOUT on infinite fence");
@@ -2190,9 +2264,15 @@ void VulkanRenderer::WaitForNextFinishedCommandBuffer()
 
 void VulkanRenderer::SubmitCommandBuffer(VkSemaphore signalSemaphore, VkSemaphore waitSemaphore)
 {
+	LATTE_PERF_SCOPE(tmrSubmit);
+	LATTE_PERF_COUNT(cntSubmits);
+
 	draw_endRenderPass();
 
 	occlusionQuery_notifyEndCommandBuffer();
+
+	if (m_cmdBufferHasTimestamps[m_commandBufferIndex])
+		vkCmdWriteTimestamp(m_state.currentCommandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_gpuTimestampQueryPool, (uint32)m_commandBufferIndex * 2 + 1);
 
 	vkEndCommandBuffer(m_state.currentCommandBuffer);
 
@@ -2261,6 +2341,17 @@ void VulkanRenderer::SubmitCommandBuffer(VkSemaphore signalSemaphore, VkSemaphor
 	vkCmdSetViewport(m_state.currentCommandBuffer, 0, 1, &m_state.currentViewport);
 	vkCmdSetScissor(m_state.currentCommandBuffer, 0, 1, &m_state.currentScissorRect);
 
+	if (m_gpuTimestampsSupported && g_lattePerfStatsEnabled)
+	{
+		vkCmdResetQueryPool(m_state.currentCommandBuffer, m_gpuTimestampQueryPool, (uint32)m_commandBufferIndex * 2, 2);
+		vkCmdWriteTimestamp(m_state.currentCommandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, m_gpuTimestampQueryPool, (uint32)m_commandBufferIndex * 2);
+		m_cmdBufferHasTimestamps[m_commandBufferIndex] = true;
+	}
+	else
+	{
+		m_cmdBufferHasTimestamps[m_commandBufferIndex] = false;
+	}
+
 	// DEBUG
 	//debug_genericBarrier();
 
@@ -2299,7 +2390,10 @@ bool VulkanRenderer::HasCommandBufferFinished(uint64 commandBufferId) const
 void VulkanRenderer::WaitCommandBufferFinished(uint64 commandBufferId)
 {
 	if (commandBufferId == m_numSubmittedCmdBuffers)
+	{
+		LATTE_PERF_COUNT(cntSubmitsForced);
 		SubmitCommandBuffer();
+	}
 	while (HasCommandBufferFinished(commandBufferId) == false)
 		WaitForNextFinishedCommandBuffer();
 }
@@ -2912,6 +3006,7 @@ bool VulkanRenderer::AcquireNextSwapchainImage(bool mainWindow)
 	if (!result)
 		return false;
 
+	LATTE_PERF_COUNT(cntSubmitsForced);
 	SubmitCommandBuffer(VK_NULL_HANDLE, chainInfo.ConsumeAcquireSemaphore());
 	return true;
 }
@@ -3003,10 +3098,16 @@ void VulkanRenderer::SwapBuffer(bool mainWindow)
 	cemu_assert_debug(m_numSubmittedCmdBuffers > 0);
 
 	// wait for the previous frame to finish rendering
-	WaitCommandBufferFinished(m_commandBufferIDOfPrevFrame);
+	{
+		LATTE_PERF_SCOPE(tmrGpuWait);
+		WaitCommandBufferFinished(m_commandBufferIDOfPrevFrame);
+	}
 	m_commandBufferIDOfPrevFrame = currentFrameCmdBufferID;
 
-	chainInfo.WaitAvailableFence();
+	{
+		LATTE_PERF_SCOPE(tmrGpuWait);
+		chainInfo.WaitAvailableFence();
+	}
 
 	VkPresentIdKHR presentId = {};
 
@@ -3067,7 +3168,10 @@ void VulkanRenderer::Flush(bool waitIdle)
 void VulkanRenderer::NotifyLatteCommandProcessorIdle()
 {
 	if (m_submitOnIdle)
+	{
+		LATTE_PERF_COUNT(cntSubmitsForced);
 		SubmitCommandBuffer();
+	}
 }
 
 void VulkanBenchmarkPrintResults();
