@@ -21,6 +21,9 @@ namespace TCL
 	// called from Latte code
 	bool TCLGPUReadRBWord(uint32& cmdWord);
 	void TCLGPUNotifyNewRetirementTimestamp();
+	// blocks the calling (Latte GPU emulation) thread for at most timeoutUs microseconds, or until a
+	// producer publishes new ring buffer data, whichever happens first. Never blocks indefinitely.
+	void TCLWaitForRBData(uint32 timeoutUs);
 
 	COSModule* GetModule();
 }
