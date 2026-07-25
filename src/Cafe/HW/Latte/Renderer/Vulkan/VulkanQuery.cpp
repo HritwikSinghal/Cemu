@@ -1,4 +1,5 @@
 #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.h"
+#include "Cafe/HW/Latte/Core/LattePerformanceMonitor.h"
 
 class LatteQueryObjectVk : public LatteQueryObject
 {
@@ -52,6 +53,8 @@ bool LatteQueryObjectVk::getResult(uint64& numSamplesPassed)
 
 void LatteQueryObjectVk::beginFragment()
 {
+	LATTE_PERF_COUNT(cntOcclusionQueries);
+
 	m_rendererVk->draw_endRenderPass();
 
 	handleFinishedFragments();

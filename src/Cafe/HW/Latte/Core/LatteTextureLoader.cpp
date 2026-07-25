@@ -1,5 +1,6 @@
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #include "Cafe/HW/Latte/LatteAddrLib/LatteAddrLib.h"
+#include "Cafe/HW/Latte/Core/LattePerformanceMonitor.h"
 #include "config/ActiveSettings.h"
 #include "Cafe/CafeSystem.h"
 
@@ -591,6 +592,7 @@ void LatteTextureLoader_loadTextureDataIntoSlice(LatteTexture* hostTexture, sint
 
 void LatteTextureLoader_UpdateTextureSliceData(LatteTexture* tex, uint32 sliceIndex, uint32 mipIndex, MPTR physImagePtr, MPTR physMipPtr, Latte::E_DIM dim, uint32 width, uint32 height, uint32 depth, uint32 mipLevels, uint32 pitch, Latte::E_HWTILEMODE tileMode, uint32 swizzle, bool dumpTex)
 {
+	LATTE_PERF_SCOPE(tmrTextureUpload);
 	LatteTextureLoaderCtx textureLoader = { 0 };
 
 	Latte::E_GX2SURFFMT format = tex->format;
@@ -632,6 +634,7 @@ void LatteTextureLoader_UpdateTextureSliceData(LatteTexture* tex, uint32 sliceIn
 
 	// allocate memory for decoded texture
 	uint32 imageSize = texDecoder->calculateImageSize(&textureLoader);
+	LATTE_PERF_ADD(cntBytesTextureUpload, imageSize);
 
 	uint8* pixelData = (uint8*)g_renderer->texture_acquireTextureUploadBuffer(imageSize);
 	// decode texture (if data is required)

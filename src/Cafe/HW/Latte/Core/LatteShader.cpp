@@ -1153,6 +1153,7 @@ void LatteSHRC_CleanupShaderStateCache()
 
 void LatteSHRC_UpdateActiveShaders()
 {
+	LATTE_PERF_SCOPE(tmrShaderUpdate);
 	// check if geometry shader is used
 	auto gsMode = LatteGPUState.contextNew.VGT_GS_MODE.get_MODE();
 

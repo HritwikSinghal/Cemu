@@ -7,6 +7,7 @@
 #include "Cafe/GameProfile/GameProfile.h"
 
 #include "Cafe/HW/Latte/Core/LatteBufferCache.h"
+#include "Cafe/HW/Latte/Core/LattePerformanceMonitor.h"
 #ifdef ENABLE_VULKAN
 #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.h"
 #endif
@@ -202,6 +203,7 @@ void LatteBufferCache_ProcessQueues()
 // upload vertex and uniform buffers and update bindings
 void LatteBufferCache_Sync(uint32 maxVtxIndex, uint32 baseInstance, uint32 instanceCount, uint32 attribBufferDirtyMask, uint32 vsUniformBufferDirtyMask, uint32 psUniformBufferDirtyMask, uint32 gsUniformBufferDirtyMask, uint8& stageUniformModifiedMask, bool isIncremental)
 {
+	LATTE_PERF_SCOPE(tmrBufferCacheSync);
 	LatteFetchShader* parsedFetchShader = LatteSHRC_GetActiveFetchShader();
 	cemu_assert_debug(parsedFetchShader);
 	uint32 maxInstance = baseInstance + instanceCount - 1;

@@ -1,6 +1,7 @@
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 #include "Cafe/HW/Latte/Core/Latte.h"
 #include "Cafe/HW/Latte/Core/LatteShader.h"
+#include "Cafe/HW/Latte/Core/LattePerformanceMonitor.h"
 
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 
@@ -39,6 +40,7 @@ void LatteTextureLoader_UpdateTextureSliceData(LatteTexture* tex, uint32 sliceIn
 void LatteTexture_ReloadData(LatteTexture* tex)
 {
 	tex->reloadCount++;
+	LATTE_PERF_COUNT(cntTextureReloads);
 	for(sint32 mip=0; mip<tex->mipLevels; mip++)
 	{
 		if(tex->dim == Latte::E_DIM::DIM_2D_ARRAY ||
@@ -47,6 +49,7 @@ void LatteTexture_ReloadData(LatteTexture* tex)
 			sint32 numSlices = std::max(tex->depth, 1);
 			for(sint32 s=0; s<numSlices; s++)
 				LatteTextureLoader_UpdateTextureSliceData(tex, s, mip, tex->physAddress, tex->physMipAddress, tex->dim, tex->width, tex->height, tex->depth, tex->mipLevels, tex->pitch, tex->tileMode, tex->swizzle, true);
+			LATTE_PERF_ADD(cntTextureReloadSlices, numSlices);
 		}
 		else if( tex->dim == Latte::E_DIM::DIM_CUBEMAP )
 		{
@@ -54,6 +57,7 @@ void LatteTexture_ReloadData(LatteTexture* tex)
 			sint32 numFullCubeMaps = tex->depth/6; // number of cubemaps (if numFullCubeMaps is >1 then this texture is a cubemap array)
 			for(sint32 s=0; s<numFullCubeMaps*6; s++)
 				LatteTextureLoader_UpdateTextureSliceData(tex, s, mip, tex->physAddress, tex->physMipAddress, tex->dim, tex->width, tex->height, tex->depth, tex->mipLevels, tex->pitch, tex->tileMode, tex->swizzle, true);
+			LATTE_PERF_ADD(cntTextureReloadSlices, numFullCubeMaps*6);
 		}
 		else if( tex->dim == Latte::E_DIM::DIM_3D )
 		{
@@ -62,11 +66,13 @@ void LatteTexture_ReloadData(LatteTexture* tex)
 			{
 				LatteTextureLoader_UpdateTextureSliceData(tex, s, mip, tex->physAddress, tex->physMipAddress, tex->dim, tex->width, tex->height, tex->depth, tex->mipLevels, tex->pitch, tex->tileMode, tex->swizzle, true);
 			}
+			LATTE_PERF_ADD(cntTextureReloadSlices, mipDepth);
 		}
 		else
 		{
 			// load slice 0
 			LatteTextureLoader_UpdateTextureSliceData(tex, 0, mip, tex->physAddress, tex->physMipAddress, tex->dim, tex->width, tex->height, tex->depth, tex->mipLevels, tex->pitch, tex->tileMode, tex->swizzle, true);
+			LATTE_PERF_COUNT(cntTextureReloadSlices);
 		}
 	}
 	tex->lastUpdateEventCounter = LatteTexture_getNextUpdateEventCounter();
@@ -293,6 +299,7 @@ void LatteTexture_updateTexturesForStage(LatteDecompilerShader* shaderContext, u
 // also sets LatteGPUState.requiresTextureBarrier to true if texture barrier is required
 void LatteTexture_updateTextures()
 {
+	LATTE_PERF_SCOPE(tmrTextureUpdate);
 	LatteGPUState.textureBindCounter++;
 	// pixel shader
 	LatteDecompilerShader* pixelShader = LatteSHRC_GetActivePixelShader();
