@@ -273,7 +273,14 @@ public:
 	void TextureUploadBufferRelease(uint8* mem)
 	{
 		cemu_assert_debug(m_textureUploadBuffer.data() == mem);
-		m_textureUploadBuffer.clear();
+		// don't shrink here, so the next Acquire() only pays for a (zero-init) resize() when it actually needs more than the current high-water mark
+		constexpr size_t kTextureUploadBufferShrinkThreshold = 64u * 1024 * 1024;
+		if (m_textureUploadBuffer.size() > kTextureUploadBufferShrinkThreshold)
+		{
+			// memory-pressure valve: release an oversized buffer instead of keeping it pinned forever
+			m_textureUploadBuffer.clear();
+			m_textureUploadBuffer.shrink_to_fit();
+		}
 	}
 
 	VKRSynchronizedRingAllocator& getStagingAllocator() { return m_stagingBuffer; }; // allocator for texture/attribute/uniform uploads
