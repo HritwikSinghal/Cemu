@@ -193,7 +193,10 @@ uint32 LatteCP_readU32Deprc()
 		// still no command data available, do some other tasks
 		LatteTiming_HandleTimedVsync();
 		LatteAsyncCommands_checkAndExecute();
-		std::this_thread::yield();
+		// Block instead of busy-yielding, but only for a bounded time: LatteTiming_HandleTimedVsync()
+		// above drives the emulated vsync by polling, so this loop must keep coming back to it at
+		// bounded latency rather than sleeping until a producer wakes it.
+		TCL::TCLWaitForRBData(200);
 		performanceMonitor.gpuTime_idleTime.endMeasuring();
 	}
 	UNREACHABLE;
@@ -475,6 +478,7 @@ LatteCMDPtr LatteCP_itWaitRegMem(LatteCMDPtr cmd, uint32 nWords)
 		// wait for memory address
 		performanceMonitor.gpuTime_fenceTime.beginMeasuring();
 		LATTE_PERF_SCOPE(tmrFenceWait);
+		uint32 fenceWaitIteration = 0;
 		while (true)
 		{
 			uint32 fenceMemValue = _swapEndianU32(*fencePtr);
@@ -526,9 +530,18 @@ LatteCMDPtr LatteCP_itWaitRegMem(LatteCMDPtr cmd, uint32 nWords)
 				stalls = true;
 			}
 
-			// check if any GPU events happened
-			LatteTiming_HandleTimedVsync();
-			LatteAsyncCommands_checkAndExecute();
+			_mm_pause();
+			// LatteTiming_HandleTimedVsync()/LatteAsyncCommands_checkAndExecute() each involve a
+			// clock_gettime() call; polling them every single spin iteration is wasteful since this
+			// loop can iterate at very high frequency while waiting for the fence. Check periodically
+			// instead (first iteration included, so a short wait still services them promptly) while
+			// still re-reading the fence memory itself every iteration.
+			if ((fenceWaitIteration++ % 64) == 0)
+			{
+				// check if any GPU events happened
+				LatteTiming_HandleTimedVsync();
+				LatteAsyncCommands_checkAndExecute();
+			}
 		}
 		performanceMonitor.gpuTime_fenceTime.endMeasuring();
 	}

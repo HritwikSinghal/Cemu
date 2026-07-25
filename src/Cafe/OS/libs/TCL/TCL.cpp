@@ -3,6 +3,8 @@
 
 #include "HW/Latte/Core/LattePM4.h"
 
+#include <condition_variable>
+
 namespace TCL
 {
 	SysAllocator<coreinit::OSEvent> s_updateRetirementEvent;
@@ -68,6 +70,13 @@ namespace TCL
 	std::atomic<uint32> tclRingBufferA_readIndex{0};
 	std::atomic<uint32> tclRingBufferA_writeIndex{0};
 
+	// Consumer (Latte GPU thread) blocking-wait state, used by TCLWaitForRBData(). Kept separate
+	// from the ring buffer indices themselves: on the common "ring already has data" path, no lock
+	// is ever touched.
+	std::mutex s_ringConsumerWaitMutex;
+	std::condition_variable s_ringConsumerWaitCV;
+	std::atomic<bool> s_ringConsumerWaiting{false};
+
 	// GPU code calls this to grab the next command word
 	bool TCLGPUReadRBWord(uint32& cmdWord)
 	{
@@ -80,9 +89,62 @@ namespace TCL
 		return true;
 	}
 
+	// Blocks the calling (Latte GPU) thread until either new ring buffer data is published or
+	// timeoutUs microseconds have elapsed, whichever comes first. Called from the consumer's idle
+	// spin loop instead of yield()-ing unconditionally, so the thread can actually sleep instead of
+	// busy-polling. The wait is bounded (never indefinite) because the caller still needs to service
+	// the polled vsync timer and other periodic duties at bounded latency even while the ring is empty.
+	void TCLWaitForRBData(uint32 timeoutUs)
+	{
+		std::unique_lock lock(s_ringConsumerWaitMutex);
+		s_ringConsumerWaiting.store(true, std::memory_order::relaxed);
+		// StoreLoad ordering barrier for the sleep/wake handshake with the producer side
+		// (TCLNotifyRBDataAvailable()). This is a Dekker-style race: we store the waiting flag then
+		// load the write index below, while the producer stores the write index then loads the flag.
+		// Under TSO (and the C++ memory model) each side's store may linger in its store buffer past
+		// its own subsequent load, so without a barrier the consumer can read a stale (empty) write
+		// index while the producer reads a stale waiting==false -- the notify is skipped and we sleep
+		// the whole timeout with work already queued. A matching seq_cst fence on each side puts the
+		// four accesses (our flag-store + index-load here, the producer's index-store + flag-load) into
+		// a single total order, so at least one side must observe the other's store: either we see the
+		// newly published data and return immediately, or the producer sees the waiting flag set and
+		// takes s_ringConsumerWaitMutex to notify. Because that notify path also takes the mutex, which
+		// we hold here until wait_for() atomically releases it, the notify cannot slip in between this
+		// re-check and the wait: it either fired before us (harmless -- the outer loop rechecks) or it
+		// blocks on the mutex until we are genuinely waiting.
+		std::atomic_thread_fence(std::memory_order::seq_cst);
+		uint32 readIndex = tclRingBufferA_readIndex.load(std::memory_order::relaxed);
+		uint32 writeIndex = tclRingBufferA_writeIndex.load(std::memory_order::acquire);
+		if (readIndex != writeIndex)
+		{
+			s_ringConsumerWaiting.store(false, std::memory_order::relaxed);
+			return;
+		}
+		s_ringConsumerWaitCV.wait_for(lock, std::chrono::microseconds(timeoutUs));
+		s_ringConsumerWaiting.store(false, std::memory_order::relaxed);
+	}
+
+	// Called by producer-side code right after it publishes new ring buffer data (i.e. right after the
+	// release-store of tclRingBufferA_writeIndex). Cheap when nobody is waiting: a seq_cst fence plus a
+	// single relaxed atomic load, so the common (no-waiter) case still never touches the mutex.
+	static void TCLNotifyRBDataAvailable()
+	{
+		// Producer half of the StoreLoad handshake documented in TCLWaitForRBData(): this fence orders
+		// the caller's preceding release-store of tclRingBufferA_writeIndex ahead of the flag load
+		// below, mirroring the consumer's fence between its flag-store and index-load. The two seq_cst
+		// fences give the four accesses one total order, so we cannot both miss the waiting flag and
+		// leave a just-woken-checking consumer having missed the data we published.
+		std::atomic_thread_fence(std::memory_order::seq_cst);
+		if (!s_ringConsumerWaiting.load(std::memory_order::relaxed))
+			return;
+		std::lock_guard lock(s_ringConsumerWaitMutex);
+		s_ringConsumerWaitCV.notify_one();
+	}
+
 	void TCLWaitForRBSpace(uint32be numU32s)
 	{
 		uint32 writeIndex = tclRingBufferA_writeIndex.load(std::memory_order::relaxed);
+		uint32 spinCount = 0;
 		while (true)
 		{
 			uint32 readIndex = tclRingBufferA_readIndex.load(std::memory_order::acquire);
@@ -91,7 +153,17 @@ namespace TCL
 				distance = TCL_RING_BUFFER_SIZE;
 			if (distance >= numU32s + 1) // assume distance minus one, because we are never allowed to completely wrap around
 				break;
-			_mm_pause();
+			// ring full is rare (consumer is normally far faster than the producer). Spin briefly first,
+			// then fall back to yielding so a stalled consumer doesn't leave us pegging the core.
+			if (spinCount < 4096)
+			{
+				_mm_pause();
+				spinCount++;
+			}
+			else
+			{
+				std::this_thread::yield();
+			}
 		}
 	}
 
@@ -110,6 +182,8 @@ namespace TCL
 		}
 
 		tclRingBufferA_writeIndex.store(writeIndex, std::memory_order::release);
+		TCLNotifyRBDataAvailable(); // wake the consumer if it is blocked in TCLWaitForRBData(). Also
+		                            // covers TCLSubmitRetireMarker(), which publishes via this same function.
 	}
 
 	#define EVENT_TYPE_TS		5
