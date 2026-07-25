@@ -260,12 +260,17 @@ public:
 	// texture memory management
 	std::unordered_map<uint32, std::unique_ptr<VkTextureChunkedHeap>> map_textureHeap; // one heap per memory type
 	std::vector<uint8> m_textureUploadBuffer;
+	// hysteresis bookkeeping for TextureUploadBufferRelease(), see there for details. Single-threaded
+	// (LatteThread only), no locking needed.
+	size_t m_textureUploadBufferMaxRequestedSinceTrim{0}; // largest size passed to Acquire() since the last trim check
+	uint32 m_textureUploadBufferReleaseCountSinceTrim{0}; // releases since the last trim check
 
 	// texture upload buffer
 	void* TextureUploadBufferAcquire(uint32 size)
 	{
 		if (m_textureUploadBuffer.size() < size)
 			m_textureUploadBuffer.resize(size);
+		m_textureUploadBufferMaxRequestedSinceTrim = std::max(m_textureUploadBufferMaxRequestedSinceTrim, (size_t)size);
 
 		return m_textureUploadBuffer.data();
 	}
@@ -275,11 +280,23 @@ public:
 		cemu_assert_debug(m_textureUploadBuffer.data() == mem);
 		// don't shrink here, so the next Acquire() only pays for a (zero-init) resize() when it actually needs more than the current high-water mark
 		constexpr size_t kTextureUploadBufferShrinkThreshold = 64u * 1024 * 1024;
-		if (m_textureUploadBuffer.size() > kTextureUploadBufferShrinkThreshold)
+		// only re-evaluate every N releases, and only trim if nothing in that window actually needed
+		// more than the threshold. This is a memory-pressure valve with hysteresis: without it, any
+		// buffer above the threshold gets cleared + shrink_to_fit'd on literally every release, so a
+		// workload that genuinely needs >64MiB permanently pays malloc + zero-init + free per upload
+		// instead of reusing its high-water-mark buffer. A one-off oversized spike is still released,
+		// just after up to kTextureUploadBufferTrimCheckInterval small uploads instead of immediately.
+		constexpr uint32 kTextureUploadBufferTrimCheckInterval = 1024;
+		if (++m_textureUploadBufferReleaseCountSinceTrim >= kTextureUploadBufferTrimCheckInterval)
 		{
-			// memory-pressure valve: release an oversized buffer instead of keeping it pinned forever
-			m_textureUploadBuffer.clear();
-			m_textureUploadBuffer.shrink_to_fit();
+			if (m_textureUploadBuffer.size() > kTextureUploadBufferShrinkThreshold &&
+				m_textureUploadBufferMaxRequestedSinceTrim <= kTextureUploadBufferShrinkThreshold)
+			{
+				m_textureUploadBuffer.clear();
+				m_textureUploadBuffer.shrink_to_fit();
+			}
+			m_textureUploadBufferMaxRequestedSinceTrim = 0;
+			m_textureUploadBufferReleaseCountSinceTrim = 0;
 		}
 	}
 
