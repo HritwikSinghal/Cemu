@@ -3,6 +3,7 @@
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 #include "Cafe/HW/Latte/Core/LattePerformanceMonitor.h"
 #include "Common/cpu_features.h"
+#include "util/containers/robin_hood.h"
 
 #if defined(ARCH_X86_64) && defined(__GNUC__)
 #include <immintrin.h>
@@ -10,54 +11,186 @@
 #include <arm_neon.h>
 #endif
 
-struct
+// key used to look up a previously converted index buffer
+// two draws share a cache entry only if all fields match exactly (hash collisions are resolved via operator==, see LatteIndexCacheKeyHash)
+struct LatteIndexCacheKey
+{
+	const void* dataPtr;
+	uint32 count;
+	LattePrimitiveMode primitiveMode;
+	LatteIndexType indexType;
+	// primitive-restart index register (VGT_MULTI_PRIM_IB_RESET_INDX) value at decode time. The computed indexMax depends on it: any index
+	// equal to this value is treated as a restart marker and excluded from the max (see the fallback in LatteIndices_decode), so two draws
+	// over the same buffer with different restart indices can produce different indexMax and must not share an entry
+	uint32 primitiveRestartIndex;
+
+	bool operator==(const LatteIndexCacheKey& other) const noexcept
+	{
+		return dataPtr == other.dataPtr && count == other.count && primitiveMode == other.primitiveMode && indexType == other.indexType && primitiveRestartIndex == other.primitiveRestartIndex;
+	}
+};
+
+struct LatteIndexCacheKeyHash
+{
+	size_t operator()(const LatteIndexCacheKey& key) const noexcept
+	{
+		size_t h = robin_hood::hash<const void*>{}(key.dataPtr);
+		auto combine = [&h](size_t v) { h ^= v + 0x9E3779B97F4A7C15ULL + (h << 6) + (h >> 2); };
+		combine(robin_hood::hash<uint32>{}(key.count));
+		combine(robin_hood::hash<uint32>{}(static_cast<uint32>(key.primitiveMode)));
+		combine(robin_hood::hash<uint32>{}(static_cast<uint32>(key.indexType)));
+		combine(robin_hood::hash<uint32>{}(key.primitiveRestartIndex));
+		return h;
+	}
+};
+
+struct LatteIndexCacheStruct
 {
 	struct CacheEntry
 	{
-		// input data
+		// key fields, duplicated here from LatteIndexCacheKey. lastPtr is load-bearing: LatteIndices_invalidate() only sees CacheEntry
+		// values (not the map key) and needs it to compute the entry's guest data range. The rest just make an entry self-describing.
+		// Exact key matching on lookup (not trusting the hash alone) is handled by the map itself via LatteIndexCacheKey::operator==
 		const void* lastPtr;
 		uint32 lastCount;
 		LattePrimitiveMode lastPrimitiveMode;
 		LatteIndexType lastIndexType;
+		uint32 lastPrimitiveRestartIndex;
 		uint64 lastUsed;
+		// byte size of the guest-memory range starting at lastPtr that the conversion read from. Zero for AUTO (no source data), used by LatteIndices_invalidate()
+		uint32 sourceDataSize;
+		// cheap sampled hash of the source index data, taken right after conversion. Recomputed and compared on every cache hit to catch the guest
+		// CPU rewriting index data in place without ever routing through LatteIndices_invalidate() (this is the common case -- see call sites)
+		uint64 validationHash;
 		// output
 		uint32 indexMax;
 		Renderer::INDEX_TYPE renderIndexType;
 		uint32 outputCount;
 		Renderer::IndexAllocation indexAllocation;
 	};
-	std::array<CacheEntry, 8> entry;
+	// NOTE: despite the map being able to hold many entries, it does NOT persist across frames in practice. LatteIndices_invalidateAll()
+	// wipes it from LatteCP_signalEnterWait() (at least once per frame via the scanbuffer swap, plus on every command-processor starvation)
+	// and from VKRMemoryManager::cleanupBuffers() (per retired command buffer), so entries effectively live for one uninterrupted burst of
+	// draw commands. It still beats the old fixed 8-slot array because within a single burst hundreds of distinct meshes (e.g. BotW) no
+	// longer evict each other. Removing those invalidateAll() flushes to unlock true cross-frame persistence must NOT be done without first
+	// closing the validation-hash sampling gaps (see LatteIndices_decode) -- once the flushes are gone the hash is the only staleness defense
+	robin_hood::unordered_flat_map<LatteIndexCacheKey, CacheEntry, LatteIndexCacheKeyHash> entries;
 	uint64 currentUsageCounter{0};
-}LatteIndexCache{};
+} LatteIndexCache{};
 
-void LatteIndices_invalidate(const void* memPtr, uint32 size)
-{
-	for(auto& entry : LatteIndexCache.entry)
-	{
-		if (entry.lastPtr >= memPtr && (entry.lastPtr < ((uint8*)memPtr + size)) )
-		{
-			if(entry.lastPtr != nullptr)
-				g_renderer->indexData_releaseIndexMemory(entry.indexAllocation);
-			entry.lastPtr = nullptr;
-			entry.lastCount = 0;
-		}
-	}
-}
-
-void LatteIndices_invalidateAll()
-{
-	for(auto& entry : LatteIndexCache.entry)
-	{
-		if (entry.lastPtr != nullptr)
-			g_renderer->indexData_releaseIndexMemory(entry.indexAllocation);
-		entry.lastPtr = nullptr;
-		entry.lastCount = 0;
-	}
-}
+// cap on the number of entries kept alive at once, to bound memory/allocation usage. Only checked on insert (i.e. only on a cache miss),
+// so it does not add any per-draw overhead on the (hopefully common) cache hit path
+constexpr size_t LATTE_INDEX_CACHE_MAX_ENTRIES = 2048;
+// on a cap-triggered sweep, entries used more recently than (currentUsageCounter - keepWindow) survive the first pass
+constexpr uint64 LATTE_INDEX_CACHE_KEEP_WINDOW = 1024;
 
 uint64 LatteIndices_GetNextUsageIndex()
 {
 	return LatteIndexCache.currentUsageCounter++;
+}
+
+// computes the byte size of the source (guest) index data that a conversion reads. AUTO indices are generated without reading any source
+// data, so they have no range to invalidate and are not eligible for the staleness validation hash either
+uint32 LatteIndices_calculateSourceDataSize(LatteIndexType indexType, uint32 count)
+{
+	if (indexType == LatteIndexType::AUTO)
+		return 0;
+	if (indexType == LatteIndexType::U16_BE || indexType == LatteIndexType::U16_LE)
+		return count * sizeof(uint16);
+	if (indexType == LatteIndexType::U32_BE || indexType == LatteIndexType::U32_LE)
+		return count * sizeof(uint32);
+	cemu_assert_suspicious();
+	return 0;
+}
+
+// cheap sampled hash of the source index data, in the spirit of LatteTexture_CalculateTextureDataHash() in LatteTextureCache.cpp: instead of
+// hashing the full (potentially huge) index buffer we only sample the first and last 64 bytes plus a 64 byte block every 2048 bytes. This is
+// far cheaper than a full reconversion while still catching the vast majority of in-place edits a game would realistically perform
+uint64 LatteIndices_calculateValidationHash(const void* data, uint32 sizeInBytes)
+{
+	if (sizeInBytes == 0)
+		return 0;
+	const uint8* base = (const uint8*)data;
+	uint64 hashVal = 0;
+	auto foldBlock = [&hashVal](const uint8* blockPtr, uint32 blockSize)
+	{
+		uint32 numQwords = blockSize / sizeof(uint64);
+		for (uint32 i = 0; i < numQwords; i++)
+		{
+			uint64 v;
+			memcpy(&v, blockPtr, sizeof(uint64)); // avoid unaligned-access UB, the guest pointer has no alignment guarantee
+			hashVal ^= v;
+			hashVal = std::rotl<uint64>(hashVal, 5) + 0x9E3779B97F4A7C15ULL;
+			blockPtr += sizeof(uint64);
+		}
+	};
+	uint32 headSize = std::min<uint32>(sizeInBytes, 64);
+	foldBlock(base, headSize);
+	if (sizeInBytes > 64)
+	{
+		uint32 tailSize = std::min<uint32>(sizeInBytes, 64);
+		foldBlock(base + sizeInBytes - tailSize, tailSize);
+	}
+	for (uint32 offset = 2048; offset + 64 <= sizeInBytes; offset += 2048)
+		foldBlock(base + offset, 64);
+	return hashVal;
+}
+
+// releases the renderer-side allocation of every entry matching the predicate and erases them from the map
+template<typename TPredicate>
+static void LatteIndexCache_EvictIf(TPredicate&& predicate)
+{
+	for (auto it = LatteIndexCache.entries.begin(); it != LatteIndexCache.entries.end();)
+	{
+		if (predicate(it->second))
+		{
+			g_renderer->indexData_releaseIndexMemory(it->second.indexAllocation);
+			it = LatteIndexCache.entries.erase(it);
+		}
+		else
+			++it;
+	}
+}
+
+// invoked only right before inserting a new entry (i.e. only on a cache miss), never on the hit path
+static void LatteIndexCache_EnforceCapacity()
+{
+	if (LatteIndexCache.entries.size() < LATTE_INDEX_CACHE_MAX_ENTRIES)
+		return;
+	uint64 currentUsage = LatteIndexCache.currentUsageCounter;
+	uint64 cutoff = (currentUsage > LATTE_INDEX_CACHE_KEEP_WINDOW) ? (currentUsage - LATTE_INDEX_CACHE_KEEP_WINDOW) : 0;
+	LatteIndexCache_EvictIf([cutoff](const auto& entry) { return entry.lastUsed < cutoff; });
+	if (LatteIndexCache.entries.size() < LATTE_INDEX_CACHE_MAX_ENTRIES)
+		return;
+	// keep-window sweep didn't free anything (cache filled up with very recent entries within a short burst) -- fall back to trimming
+	// everything at or below the median usage index once, which guarantees forward progress
+	std::vector<uint64> ages;
+	ages.reserve(LatteIndexCache.entries.size());
+	for (auto& it : LatteIndexCache.entries)
+		ages.push_back(it.second.lastUsed);
+	size_t medianPos = ages.size() / 2;
+	std::nth_element(ages.begin(), ages.begin() + medianPos, ages.end());
+	uint64 medianUsage = ages[medianPos];
+	LatteIndexCache_EvictIf([medianUsage](const auto& entry) { return entry.lastUsed <= medianUsage; });
+}
+
+void LatteIndices_invalidate(const void* memPtr, uint32 size)
+{
+	const uint8* rangeBegin = (const uint8*)memPtr;
+	const uint8* rangeEnd = rangeBegin + size;
+	LatteIndexCache_EvictIf([rangeBegin, rangeEnd](const auto& entry)
+	{
+		if (entry.sourceDataSize == 0) // AUTO entries have no source data, nothing to invalidate
+			return false;
+		const uint8* entryBegin = (const uint8*)entry.lastPtr;
+		const uint8* entryEnd = entryBegin + entry.sourceDataSize;
+		return entryBegin < rangeEnd && rangeBegin < entryEnd;
+	});
+}
+
+void LatteIndices_invalidateAll()
+{
+	LatteIndexCache_EvictIf([](const auto&) { return true; });
 }
 
 uint32 LatteIndices_calculateIndexOutputSize(LattePrimitiveMode primitiveMode, LatteIndexType indexType, uint32 count)
@@ -652,22 +785,38 @@ void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32
 	// [x] unpack QUAD indices to triangle indices
 	// [x] calculate min and max index, be careful about primitive restart index
 	// [x] decode data directly into coherent memory buffer?
-	// [ ] better cache implementation, allow to cache across frames
+	// [x] better cache implementation (keyed map instead of the old 8-slot array; note: the per-frame invalidateAll() flushes currently
+	//     limit reuse to within a single draw burst, not truly across frames -- see the note on LatteIndexCacheStruct::entries)
 
-	// reuse from cache if data didn't change
-	auto cacheEntry = std::find_if(LatteIndexCache.entry.begin(), LatteIndexCache.entry.end(), [indexData, count, primitiveMode, indexType](const auto& entry)
+	// reuse from cache if data didn't change. This only hits within a single uninterrupted burst of draws -- the map is flushed several
+	// times per frame by LatteIndices_invalidateAll() (see the note on LatteIndexCacheStruct::entries) -- but within a burst it beats the
+	// old fixed 8-slot LRU array, which almost never held the right entry once more than 8 distinct meshes were drawn between flushes
+	uint32 sourceDataSize = LatteIndices_calculateSourceDataSize(indexType, count);
+	// read up front because it participates in the cache key (the restart index feeds into indexMax, see the fallback further down)
+	uint32 primitiveRestartIndex = LatteGPUState.contextNew.VGT_MULTI_PRIM_IB_RESET_INDX.get_RESTART_INDEX();
+	LatteIndexCacheKey lookupKey{indexData, count, primitiveMode, indexType, primitiveRestartIndex};
+	auto cacheIt = LatteIndexCache.entries.find(lookupKey);
+	if (cacheIt != LatteIndexCache.entries.end())
 	{
-		return entry.lastPtr == indexData && entry.lastCount == count && entry.lastPrimitiveMode == primitiveMode && entry.lastIndexType == indexType;
-	});
-	if (cacheEntry != LatteIndexCache.entry.end())
-	{
-		LATTE_PERF_COUNT(cntIndexCacheHit);
-		indexMax = cacheEntry->indexMax;
-		renderIndexType = cacheEntry->renderIndexType;
-		outputCount = cacheEntry->outputCount;
-		indexAllocation = cacheEntry->indexAllocation;
-		cacheEntry->lastUsed = LatteIndices_GetNextUsageIndex();
-		return;
+		auto& cacheEntry = cacheIt->second;
+		// validate that the guest CPU hasn't rewritten the source data in place since the entry was cached without routing through
+		// LatteIndices_invalidate(). While the invalidateAll() flushes above remain, this sampled hash is only a secondary defense that
+		// catches in-place rewrites within a burst; its sampling (64B head/tail + one 64B block per 2048B) has blind spots of up to
+		// ~1984 bytes, acceptable only because the per-frame flushes bound how long a stale entry can survive
+		bool stillValid = (sourceDataSize == 0) || (LatteIndices_calculateValidationHash(indexData, sourceDataSize) == cacheEntry.validationHash);
+		if (stillValid)
+		{
+			LATTE_PERF_COUNT(cntIndexCacheHit);
+			indexMax = cacheEntry.indexMax;
+			renderIndexType = cacheEntry.renderIndexType;
+			outputCount = cacheEntry.outputCount;
+			indexAllocation = cacheEntry.indexAllocation;
+			cacheEntry.lastUsed = LatteIndices_GetNextUsageIndex();
+			return;
+		}
+		// stale entry: release its allocation now and fall through to reconvert. Counts as a miss like any other non-hit
+		g_renderer->indexData_releaseIndexMemory(cacheEntry.indexAllocation);
+		LatteIndexCache.entries.erase(cacheIt);
 	}
 	LATTE_PERF_COUNT(cntIndexCacheMiss);
 
@@ -680,8 +829,6 @@ void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32
 		renderIndexType = Renderer::INDEX_TYPE::U32;
 	else
 		cemu_assert_debug(false);
-
-	uint32 primitiveRestartIndex = LatteGPUState.contextNew.VGT_MULTI_PRIM_IB_RESET_INDX.get_RESTART_INDEX();
 
 	// calculate index output size
 	uint32 indexOutputSize = LatteIndices_calculateIndexOutputSize(primitiveMode, indexType, count);
@@ -849,22 +996,22 @@ void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32
 	g_renderer->indexData_uploadIndexMemory(indexAllocation);
 	LATTE_PERF_ADD(cntBytesIndexUpload, indexOutputSize);
 	performanceMonitor.cycle[performanceMonitor.cycleIndex].indexDataUploaded += indexOutputSize;
-	// get least recently used cache entry
-	auto lruEntry = std::min_element(LatteIndexCache.entry.begin(), LatteIndexCache.entry.end(), [](const auto& a, const auto& b)
-	{
-		return a.lastUsed < b.lastUsed;
-	});
-	// invalidate previous allocation
-	if(lruEntry->lastPtr != nullptr)
-		g_renderer->indexData_releaseIndexMemory(lruEntry->indexAllocation);
-	// update cache
-	lruEntry->lastPtr = indexData;
-	lruEntry->lastCount = count;
-	lruEntry->lastPrimitiveMode = primitiveMode;
-	lruEntry->lastIndexType = indexType;
-	lruEntry->indexMax = indexMax;
-	lruEntry->renderIndexType = renderIndexType;
-	lruEntry->outputCount = outputCount;
-	lruEntry->indexAllocation = indexAllocation;
-	lruEntry->lastUsed = LatteIndices_GetNextUsageIndex();
+	// make room if the cache has grown past its cap. Only happens here, on a miss that is about to insert a new entry, so it never
+	// adds overhead to the cache hit path
+	LatteIndexCache_EnforceCapacity();
+	// insert new cache entry (this also correctly replaces the stale entry erased earlier in the validation-hash-mismatch case)
+	LatteIndexCacheStruct::CacheEntry newEntry{};
+	newEntry.lastPtr = indexData;
+	newEntry.lastCount = count;
+	newEntry.lastPrimitiveMode = primitiveMode;
+	newEntry.lastIndexType = indexType;
+	newEntry.lastPrimitiveRestartIndex = primitiveRestartIndex;
+	newEntry.sourceDataSize = sourceDataSize;
+	newEntry.validationHash = (sourceDataSize != 0) ? LatteIndices_calculateValidationHash(indexData, sourceDataSize) : 0;
+	newEntry.indexMax = indexMax;
+	newEntry.renderIndexType = renderIndexType;
+	newEntry.outputCount = outputCount;
+	newEntry.indexAllocation = indexAllocation;
+	newEntry.lastUsed = LatteIndices_GetNextUsageIndex();
+	LatteIndexCache.entries.insert_or_assign(lookupKey, std::move(newEntry));
 }
