@@ -9,6 +9,16 @@ It's written in C/C++ and is being actively developed with new features and fixe
 
 Cemu is currently only available for 64-bit Windows, Linux & macOS devices.
 
+## About this fork
+
+This fork carries performance work targeting Intel integrated GPUs -- specifically Panther Lake (Xe3) with the Mesa ANV Vulkan driver on Linux:
+
+- Fix for a device loss on ANV/Xe3 caused by non-identity framebuffer attachment swizzles (required to boot games on this GPU at all).
+- In-emulator bottleneck profiling: per-stage CPU timers and event counters on the GPU emulation thread, GPU busy time via Vulkan timestamp queries, a "Bottleneck stats" debug overlay panel, and an optional per-frame CSV dump (`CEMU_PERFSTATS_CSV`). Zero overhead unless enabled. Details in [#1](https://github.com/HritwikSinghal/Cemu/issues/1).
+- Performance optimizations for unified-memory iGPUs, driven by that profiling data. Tracked in [#2](https://github.com/HritwikSinghal/Cemu/issues/2).
+
+This is not an official Cemu release; upstream lives at [cemu-project/Cemu](https://github.com/cemu-project/Cemu).
+
 ### Links:
  - [Open Source Announcement](https://www.reddit.com/r/cemu/comments/wwa22c/cemu_20_announcement_linux_builds_opensource_and/)
  - [Official Website](https://cemu.info)
