@@ -2,7 +2,9 @@
 
 #define EMULATOR_NAME					"Cemu"
 
+#ifndef EMULATOR_VERSION_SUFFIX
 #define EMULATOR_VERSION_SUFFIX			""
+#endif
 
 #define _XSTRINGFY(s) _STRINGFY(s)
 #define _STRINGFY(s) #s

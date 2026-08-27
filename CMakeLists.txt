@@ -8,6 +8,9 @@ option(ALLOW_PORTABLE "Allow Cemu to be run in portable mode" ON)
 set(EMULATOR_VERSION_MAJOR "0" CACHE STRING "")
 set(EMULATOR_VERSION_MINOR "0" CACHE STRING "")
 set(EMULATOR_VERSION_PATCH "0" CACHE STRING "")
+# fork builds set this so the reported version cannot be mistaken for an
+# upstream release of the same major.minor, e.g. "2.6-perf1" vs "2.6"
+set(EMULATOR_VERSION_SUFFIX "" CACHE STRING "")
 
 set(THREADS_PREFER_PTHREAD_FLAG true) # needs to be set before vcpkg
 
@@ -69,6 +72,10 @@ add_compile_definitions($<$<CONFIG:Debug>:CEMU_DEBUG_ASSERT>) # if build type is
 add_definitions(-DEMULATOR_VERSION_MAJOR=${EMULATOR_VERSION_MAJOR})
 add_definitions(-DEMULATOR_VERSION_MINOR=${EMULATOR_VERSION_MINOR})
 add_definitions(-DEMULATOR_VERSION_PATCH=${EMULATOR_VERSION_PATCH})
+if(EMULATOR_VERSION_SUFFIX)
+	# add_compile_definitions (not add_definitions) so the quotes survive to the compiler
+	add_compile_definitions(EMULATOR_VERSION_SUFFIX="${EMULATOR_VERSION_SUFFIX}")
+endif()
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
