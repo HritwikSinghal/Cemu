@@ -1,49 +1,28 @@
 # Cemu Perf Campaign -- Progress
 
-## 2026-07-24
-- Ran a 3-agent codebase survey (GPU/Vulkan path, CPU/JIT path, instrumentation + build) for the BOTW 4K60 campaign; findings and file refs captured in todo.md.
-- Key finding: vertex/attribute/uniform-buffer uploads double-copy through a staging ring into m_bufferCache (allocated with property flags 0, no unified-memory awareness) -- redundant on the target iGPU. Index data and shader uniform vars already write host-visible memory directly.
-- CPU side is structurally sound (flat base+R13 memory fast path, table-indexed JIT dispatch); risk areas are interpreter fallback during async-recompile warm-up, the global scheduler mutex, and the global timer spinlock.
-- No GPU timestamp queries and no profiler integration exist in tree; per-stage draw timers exist but are compiled out (THasProfiling always false).
-- Next: hardware triage (GPU-bound vs CPU-bound vs power-limited), then instrumentation, then targeted fixes per todo.md.
+## Current state (2026-08-29)
 
-## 2026-07-25
-- Ran round-2 5-agent survey (command flow/sync, Vulkan per-draw, texture pipeline, memory/index paths, shader decompiler+uniforms); ~25 new findings recorded in todo.md as tiered "round-2 candidates".
-- Cross-cutting insight: texture/context-reg changes end draw sequences, so BOTW hits the slow first-draw path constantly; descriptor-hash, pipeline-hash, uniform-reupload, and FBO-rederive costs all share that trigger and could be fixed together via register dirty-flags.
-- Top standalone wins identified: 8-entry index cache (~0% hit rate), texture-upload zero-fill memset, LatteThread busy-spin (power steal from iGPU), occlusion-query renderpass splits + WAIT_BIT.
-- Config audit: user's settings.xml has VSync=2 (MAILBOX, safe) and AsyncCompile=true; VSync mode 3 (SYNC_AND_LIMIT) confirmed broken/hang-prone on Linux builds.
-- Profiling env: perf/turbostat/hotspot NOT installed; intel_gpu_top present; perf_event_paranoid=2; existing bin/Cemu_release is -O3 no-debug-info but unstripped (flat profiles OK, no call graphs).
-- Next: user picks fixes to implement (no builds/tests this session per user instruction); profiling capture recipe delivered in chat.
+GOAL: BOTW at a locked, stutter-free 60fps at the user's CURRENT settings -- 3200x1800 render, Draw
+Distance pack at Ultra, output to the 3840x2160 panel. Working branch `patch`, tree clean, build green.
 
-## 2026-07-25 (later): instrumentation implemented
-- Built the bottleneck instrumentation suite (scaffold by main agent, call sites by 2 sonnet subagents, all diffs reviewed line-by-line by main agent):
-  - LattePerformanceMonitor.h/.cpp: performanceMonitor.bottleneck struct (15 TSC timers, 18 per-frame counters, GPU-busy ns), nesting-safe LattePerfStatTimer, LATTE_PERF_SCOPE/COUNT/ADD macros, g_lattePerfStatsEnabled runtime toggle (overlay debug checkbox or CEMU_PERFSTATS_CSV env var), per-frame CSV writer.
-  - LatteOverlay.cpp: "Bottleneck stats" panel in the debug overlay (GPU busy ms, draw/sequence-end/cache-miss counters, per-stage CPU us, wait buckets, upload KB, vsync lateness).
-  - Latte core call sites: idle spin + guest fence timers (LatteCommandProcessor), seq-end reason counters, index cache hit/miss + bytes (LatteIndices), buffer sync / shader update / FBO update / texture bind+hash+upload timers, texture reload counters, vsync lateness (LatteTiming).
-  - Vulkan call sites: draw first/fast counters, uniform/pipeline/descriptor/renderpass/submit timers, async-skip + ds/pipeline miss + forced-submit counters, GPU timestamp query pool (per-cmdbuffer TOP/BOTTOM pair, readback at fence retirement in ProcessFinishedCommandBuffers, timestampValidBits masked, timestampPeriod converted to ns).
-- Overhead when toggle off: one branch per call site. When on: two TSC reads per scope (~10-20ns each) + 2 GPU timestamps per cmdbuffer -- negligible vs the costs being measured.
-- NOT built locally (user instruction); compile verification relies on the push-triggered build-check workflow on branch patch.
-- Task queue (task list): #3 spawn no-regret fix agents (index cache / texture zero-fill / spin-to-block) auto-follows the instrumentation push; #4 review+commit+push those fixes.
-- Capture workflow for next session: enable Options > Overlay > Debug in a heavy scene, or run with CEMU_PERFSTATS_CSV=/tmp/botw.csv; compare frametime vs "GPU busy" first, then read the CPU/wait buckets.
+MEASURED, at those exact settings (n=8156 heavy frames >=4000 draws, medians): frametime 29.60ms
+(33.8fps), gpuBusy 28.13ms = 95% of frametime, gpuWait 18.94ms, all twelve CPU stages together 5.57ms,
+5521 draws/frame. GPU-bound; needs a ~1.77x GPU-work cut. Steady slowness, NOT stutter (hitches are
+0.1-0.2% of frames). No time-based degradation -- the "smooth for a minute" effect is draw count.
 
-## 2026-07-25 (later still): first optimizations landed + project tracking
-- Landed the three "no-regret" Tier 1 fixes (each implemented by a sonnet agent, diff-reviewed line-by-line by main agent, committed individually):
-  - 72d215d texture upload zero-fill (VKRMemoryManager.h, 64 MiB valve). Metal backend has the same bug -- noted as upstream follow-up in todo.md.
-  - 4a10a44 command processor spin-to-block (TCL condvar wait bounded at 200us due to polled vsync; throttled fence-loop clock reads; producer yield fallback). Missed-wakeup race prevented by consumer flag-set + ring re-check under the same mutex the producer notifies under; 200us timeout is the backstop for the relaxed-load fast path.
-  - f94bcd1 persistent cross-frame index cache (robin_hood map, 2048 cap, sampled validation hash per hit -- key finding: LatteIndices_invalidate only ever covered the immediate-mode scratch buffer, so the hash is the primary staleness defense, same model as the texture cache).
-- GitHub tracking on the fork (issues were disabled by default -- enabled them): issue #1 = profiling instrumentation, issue #2 = optimization tracker (landed/in-progress/backlog). README now has an "About this fork" section (563f356).
-- NOT built locally (user instruction): compile verification = the push-triggered "Build check" workflow on branch patch (takes ~36 min per run). CHECK THE LATEST RUN RESULT BEFORE BUILDING ON THIS WORK -- the instrumentation run and the fixes run may surface compile errors to fix (robin_hood template instantiation in LatteIndices.cpp flagged as the main risk by the implementing agent).
-- Next session: (1) check CI result, fix any compile errors; (2) user plays a heavy BOTW scene with overlay debug or CSV -> read GPU busy vs frametime, SeqEnd counters, IdxCache hit/miss to pick the next target (likely the register dirty-flag scheme if first-draw costs dominate); (3) verify in-game that the three fixes hold (index cache: watch for geometry corruption -- would indicate validation-hash misses; spin-to-block: idleSpin bucket should collapse, core no longer pegged).
+ESTIMATED split at 1800p (3.15 ms/Mpx slope from the 4K-vs-1440p fit): pixel-scaled P ~18.1ms, fixed
+F ~10.0ms. Two consequences drive everything: every CPU-side candidate has ceiling ~0 (5.57ms hidden
+under 18.94ms of gpuWait), and FSR alone does not reach 60fps at Draw Distance Ultra because no
+pixel-side lever touches F.
 
-## 2026-07-25 (evening): local build gate + /bugs sweep + fix batch
-- Switched to local builds (user request; CI queue was ~4 runs deep at ~35 min each). Existing build/ dir (clang release Ninja) reused; bin/Cemu_release now current.
-- Found and fixed the compile break CI would have caught: fdbe9e9's vkCmdWriteTimestamp/vkGetQueryPoolResults were missing from the VKFUNC_DEVICE dynamic loader table (Cemu builds with VK_NO_PROTOTYPES). Fix committed as 91aebca.
-- Ran /bugs as a 4-agent parallel hunt over the recent work (index cache, spin-to-block, instrumentation suite, zero-fill); main agent re-verified every major finding in code before accepting it. Full findings recorded in todo.md "Bug hunt findings" section.
-- Key discoveries: (a) f94bcd1's index cache never actually persisted across frames -- pre-existing LatteCP_signalEnterWait + cleanupBuffers invalidateAll calls wipe it several times per frame, so it is a within-burst cache (the 2026-07-25 "later still" entry above and the commit message overstate it); (b) the spin-to-block wake handshake had a real TSO StoreLoad lost-wakeup race bounded by the 200us timeout; (c) the nesting-depth guard added to the shared timer class froze two legacy timers.
-- Fix batch (3 parallel fix agents on disjoint files, diffs line-by-line reviewed by main agent, local build green, committed individually): d048d70 TCL seq_cst fence pair; f073d28 index cache key + honest comments (also adds VGT_MULTI_PRIM_IB_RESET_INDX to the key); 7c57aca timer type split + CSV flush-per-row + "GPU busy (retired)" labeling; d523041 upload-buffer valve hysteresis (trim check every 1024 releases).
-- Deliberately NOT fixed: validation-hash sampling blind spots (documented in-code; only matters if the invalidateAll flushes are ever gated -- prereq noted in todo.md).
-- DONE (same evening): pushed to patch through 7f8dc37 (5 code fixes + docs); CI "Build check" started on the tip and stale queued runs auto-cancelled. Compile gate is now the LOCAL clang build (cmake --build build, ~2 min incremental, green; bin/Cemu_release current) -- CI is a secondary check only.
-- DONE (see next entry): user captured /tmp/botw.csv; analyzed. VERDICT: GPU-bound.
+BLOCKING THE WHOLE CAMPAIGN: the measurement harness. The control test's noise floor is 8.6ms, so only
+a >=10ms effect is currently resolvable. A stationary fixed-viewpoint workload is the prerequisite for
+VRS and fp16, not optional hygiene.
+
+NEXT: (1) [[display-output-cost]], free and may reframe the budget; (2) stationary workload + noise
+floor; (3) [[botw-frame-budget]] resolution ladder; (4) then FSR. Detail per topic is in
+claude/workstreams/; measurement recipes in claude/profiling.md; candidate list and ceilings in
+claude/todo.md.
 
 ## 2026-07-26: first CSV capture analyzed -- heavy scenes are GPU-bound
 (capture file written 2026-07-25, analyzed in the 2026-07-26 session)
@@ -87,22 +66,124 @@ No code changes this session -- documentation only, so a fresh session can act w
   3. Re-capture a persistent 1440p CSV baseline (the A/B reference for any future fix).
   Then pick from the prioritized GPU levers in todo.md: shadow/AO pack (free), occlusion-query renderpass splits (39% of the 1440p budget is resolution-independent), fp16 spike (biggest, riskiest).
 
-## 2026-08-28: upstream merge + first fork release (RESUME HERE)
-No perf work this session -- upstream sync, CI repair, and release plumbing.
+## 2026-08-29: measured at the real target settings; several planned wins REFUTED (RESUME HERE)
+Per-topic detail now lives in `claude/workstreams/` -- this entry is the index, not the record.
+Open only the workstream matching the task; the SessionStart hook lists one manifest line each.
+
+GOAL RESTATED by the user: stutter-free locked 60fps at the CURRENT settings (3200x1800 render, Draw
+Distance pack at Ultra, 3840x2160 output). The "increase draw distance further" goal is set aside.
+
+WHAT THE MEASUREMENTS SAY (first captures ever taken at the real target settings; raw CSVs survive at
+~/Projects/Cemu-perf/botw-1800p-{before,after}.csv):
+- ~34-35fps, dead steady, 84-88% GPU-bound. 70-80% of frames miss 60fps but only 2.4% miss 30fps.
+- **This is a steady-slowness problem, NOT a stutter problem.** Genuine hitches are 0.12-0.22% of frames,
+  and the worst ones are guest-side CPU stalls (idleSpin, gpuBusy ~0.7ms on a 200ms frame), not renderer
+  work. Gap to 60fps is a ~1.75x GPU-work cut.
+
+THREE THINGS I PREDICTED OR CLAIMED THAT THE DATA REFUTED -- recorded so they are not re-proposed:
+1. The occlusion-query WAIT_BIT removal was predicted to drop gpuBusyUs. It did not; like-for-like by
+   draw bucket it is flat-to-slightly-worse. The mechanism argument (Vulkan spec, Mesa source, an in-tree
+   precedent) was sound and still did not predict reality. The 7.3ms attribution of resolution-independent
+   cost to query drains is UNSUPPORTED. Built green, then REVERTED -- the remaining case for it was
+   correctness cleanup on a load-bearing sync path, which does not justify the risk at zero measured gain.
+   Diff kept at ~/Projects/Cemu-perf/occlusion-query-waitbit-removal.patch. [[occlusion-query-stalls]]
+2. I called mid-frame staging-ring growth "your stutter" off a microbenchmark of the allocation. It fires
+   in 7 of 10568 frames (0.066%), six of them during warm-up. Severe when it fires, almost never fires
+   during play. [[frame-hitches]]
+3. I passed on a "2x faster" texture-staging benchmark with more weight than it deserved -- it used a
+   synthetic decode stand-in and does not transfer to a textureUploadUs ratio. The verdict (do not build)
+   stands but rests on ~2.2ms of CPU being hidden under 25.6ms of gpuWait, not on that benchmark.
+
+METHODOLOGY FAILURE WORTH REMEMBERING: the A/B was two free-roam captures (7322 and 10568 steady frames)
+of the same area. Different routes made them uncomparable -- draw-count bucketing controls content only
+roughly, and a within-capture control test produced per-bucket deltas of +0.4, -3.2, +5.0, +4.1, +0.4,
+-8.6, -0.1 ms. Free-roam A/B is now banned in todo.md: stand still, fixed viewpoint, one variable.
+
+USER OBSERVATION THAT MAY OUTWEIGH EVERYTHING ELSE HERE: the same settings run much smoother on the
+laptop panel than on the 4K external -- and every number above was captured on the external
+(AW3225QF at 3840x2160 @ 240Hz). Four compounding output-side costs, three fixable in one command, none
+of them visible to Cemu's own instrumentation. This may mean the derived F of ~10.4ms is partly display
+configuration rather than game cost. RUN THIS FIRST. [[display-output-cost]]
+
+ALSO BUILT, and COMMITTED as 8dacb00: `hostAllocUs`/`hostAllocs` instrumentation + an analyzer hitch
+section, kept as permanent diagnostic capability even though they deprioritised their own workstream.
+This is the only column that separates a hitch from steady slowness.
+
+TWO TRACKER ENTRIES CORRECTED IN PLACE: the array-GPR "size to gprUseMask" fix would cause out-of-bounds
+writes (gprUseMask ignores relative indexing, the only reason that code path exists) -- correct bound is
+SQ_PGM_RESOURCES.NUM_GPRS; and "shadow/AO reduction is a free config win" is much weaker than it read.
+The pack's entire "Shadow Draw Distance" category is inert in v7 -- nothing reads those variables.
+
+ADVERSARIAL VERIFICATION: two cold-start refuters were run. The VRS dynamic-state claim survived intact
+and the failure mode I hypothesised was itself refuted; the render-vs-output decoupling claim survived
+with one sub-clause corrected. Both recorded in their workstreams with the binding constraints.
+
+NEXT, in order:
+  1. [[display-output-cost]] -- free, one command, and it may reframe the budget.
+  2. [[botw-frame-budget]] -- resolution ladder, standing still, at a fixed display mode.
+  3. Then pick a code lever with real numbers: [[fsr-upscale-filter]] (biggest), then
+     [[vrs-fragment-shading-rate]], then [[fp16-shader-precision]] (last, highest artifact risk).
+  4. SETTLED 2026-08-29: [[occlusion-query-stalls]] was reverted and its workstream closed. One item
+     outlived it -- the latent HOST_COHERENT query-buffer bug it had incidentally fixed is back in tree
+     and is now tracked on its own under todo.md "Upstream follow-ups".
+  5. Still pending from 2026-07: user visual check for index-cache geometry corruption.
+
+WORKING TREE AT SESSION END: clean. 8dacb00 committed the hostAlloc instrumentation; the occlusion-query
+change was reverted; docs and the seven new claude/workstreams/ files committed alongside. Local clang
+build green after both the commit and the revert.
+
+## 2026-08-29 (later): "smooth for a minute" refuted; ceilings computed; Eden surveyed (RESUME HERE)
+No code changes. Analysis only, against captures that already existed -- no new capture was needed.
+
+- USER OBSERVATION REFUTED, with data: "BOTW is smooth 60fps regardless of resolution until ~1min in
+  when more detail loads, then fps drops" is NOT time-based degradation. Binning the 288s capture by
+  wall time shows 58fps at 462 draws/frame in the first 15s and 38fps at 4722 draws/frame in the next
+  15s -- a ~10x step in DRAW COUNT, and fully reversible later in the same capture (1872 draws -> 50.6fps
+  at t=270s; 99 draws -> locked 60fps at t=285s). A like-for-like drift test within fixed draw-count
+  buckets, first third vs last third of the session, shows frametime +1.7%/+2.2% and textureHashUs
+  +1.0%/+9.5% -- inside the residual draw-count difference. Nothing grows with session time. In
+  particular the per-frame hash over every live texture does not become a problem as residency builds.
+  Recorded as the THIRD MEASURED VERDICT in todo.md so it is not re-hunted.
+- CEILINGS COMPUTED before proposing any code (n=8156 heavy frames, medians): frametime 29.60ms,
+  gpuBusy 28.13ms (95%), gpuWait 18.94ms, all twelve CPU stages 5.57ms, 5521 draws/frame. Estimated
+  split at 1800p: pixel-scaled P ~18.1ms, fixed F ~10.0ms. Consequences, both recorded in todo.md:
+  (a) every CPU-side candidate has ceiling ~0 -- 5.57ms hidden inside 18.94ms of gpuWait;
+  (b) **FSR alone does not reach 60fps at Draw Distance Ultra** -- 1440p render lands ~23ms (43fps),
+  1080p render ~18ms (~55fps), because F is untouched by any pixel-side lever. F is bought by the 5521
+  draws/frame the pack exists to produce. That tension is the campaign's real decision and belongs to
+  the user, not to me.
+- ORDERING INSIGHT: the 8.6ms noise floor from the earlier control test, not candidate size, sets what
+  is buildable. Only a >=10ms effect is resolvable with the current harness. VRS (4-7ms) and fp16
+  (2-4ms) are unmeasurable until the stationary fixed-viewpoint workload exists -- so that workload is
+  the prerequisite for two of the three remaining levers, not optional hygiene.
+- EDEN SURVEYED (~/Projects/eden @ 54cd5fb8eb, now INDEXED for claude-context). Their headline perf work
+  is dynarmic / buffer-cache sync / shader cache -- none of it touches a GPU-bound iGPU frame. Three
+  transferable items in todo.md "Reference codebase: Eden", of which one is declined by the ceiling gate
+  (their ANV HOST_CACHED stream-buffer change, 978d9d935d -- right driver, wrong side of the wait).
+- FP16 ROUTE REDIRECTED, and the redirect is VERIFIED not assumed. Eden uses real `float16_t` via
+  `GL_EXT_shader_explicit_arithmetic_types`, not mediump/RelaxedPrecision. Test-compiled on this box:
+  system glslang 16.4.0 accepts it and emits `OpCapability Float16` -- genuine fp16 ops, no spirv-opt
+  post-pass needed. `vulkaninfo` confirms ANV/B390 exposes `shaderFloat16 = true` and
+  VK_KHR_shader_float16_int8. BLOCKER FOUND: Cemu enables the feature NOWHERE -- grep for
+  shaderFloat16/float16 across src/Cafe/HW/Latte/Renderer/Vulkan/ is empty, so the device feature must be
+  requested at device creation before any such SPIR-V is legal. Small, well-defined prerequisite edit.
+
+## 2026-08-28: upstream merge, linear fork history, v2.6-perf2
+No perf work this session -- upstream sync, CI repair, release plumbing, history rewrite.
 - Added the real `upstream` remote (cemu-project/Cemu). None existed -- only `origin` (the fork) -- which is why local `main` looked current at the 3005cb7 branch point. Fetch it before assessing upstream drift.
 - Reviewed all 12 commits in `patch..upstream/main` (2026-07-18 -> 2026-08-21). NONE are performance changes; nothing touched the Latte core, Vulkan draw path, texture pipeline or shader decompiler, so no baseline or measured verdict is invalidated. The only one that matters here is 50b9e4b (fence errors raise UnrecoverableError instead of spamming the log) -- worth having because VK_ERROR_DEVICE_LOST is a live Xe3/ANV hazard. Rest: coreinit DynLoad callbacks, ExpHeap resize fix, PPC assembler, AArch64, CLI argstr, wayland-protocols in BUILD.md.
-- Merged upstream into `patch` as 87c0099. Only VulkanRenderer.cpp overlapped and the hunks did not collide (our GPU-timestamp readback sits in the `fenceStatus == VK_SUCCESS` branch and the gpuWait timer wraps vkWaitForFences; upstream rewrote the error tails below each). Local clang build green.
-- FOUND AND FIXED: the Build check had been RED since the instrumentation landed -- **build-windows only**; Linux x64/arm and macOS x86_64/arm64 all passed. Cause: `performanceMonitor_t` was an unnamed `typedef struct` and `bottleneck.addGpuBusyNs` put a member function inside it, which MSVC rejects (C7626). Fixed by naming the struct (301177c). NOTE: build-windows stops at the first error, so further MSVC-only issues may surface on the next run.
-- Release infrastructure: the inherited `deploy_release.yml` CANNOT produce a release on a fork -- `determine_release_version.yml` bumps the newest tag from this repo's releases API and exits 1 when there are none, and its regex rejects a `-perfN` suffix; it also builds a Windows/macOS/ARM matrix we neither ship nor test. Added `.github/workflows/deploy_fork_release.yml` (161dcc7) as a SEPARATE file so upstream merges never conflict with it: `v*-perf*` tag trigger, Linux x64 only, asserts the binary reports the fork version, packages the bin/ zip + AppImage, opens a DRAFT release.
-- `EMULATOR_VERSION_SUFFIX` is now a CMake cache var (e8d3f7c) so a fork build reports "Cemu 2.6-perf1" rather than being indistinguishable from upstream's "Cemu 2.6". Verified all three paths (suffix / no suffix / no version) compile to the right string; unversioned local builds still report the commit hash.
+- Merged upstream into `patch`. Only VulkanRenderer.cpp overlapped and the hunks did not collide (our GPU-timestamp readback sits in the `fenceStatus == VK_SUCCESS` branch and the gpuWait timer wraps vkWaitForFences; upstream rewrote the error tails below each). Local clang build green.
+- FOUND AND FIXED: the Build check had been RED since the instrumentation landed -- **build-windows only**; Linux x64/arm and macOS x86_64/arm64 all passed. Cause: `performanceMonitor_t` was an unnamed `typedef struct` and `bottleneck.addGpuBusyNs` put a member function inside it, which MSVC rejects (C7626). Fixed by naming the struct (b3922b6). All seven Build check jobs -- Linux x64/arm, macOS x86_64/arm64, Windows and both AppImage jobs -- pass on this source tree, so nothing further was hiding behind the first MSVC error.
+- Release infrastructure: the inherited `deploy_release.yml` CANNOT produce a release on a fork -- `determine_release_version.yml` bumps the newest tag from this repo's releases API and exits 1 when there are none, and its regex rejects a `-perfN` suffix; it also builds a Windows/macOS/ARM matrix we neither ship nor test. Added `.github/workflows/deploy_fork_release.yml` (08a89cb) as a SEPARATE file so upstream merges never conflict with it: `v*-perf*` tag trigger, Linux x64 only, asserts the binary reports the fork version, packages the bin/ zip + AppImage, and publishes the release directly -- the tag push is the point of no return, which is why every artifact guard fails the job before the publish step rather than warning.
+- `EMULATOR_VERSION_SUFFIX` is now a CMake cache var (49042fe) so a fork build reports "Cemu 2.6-perfN" rather than being indistinguishable from upstream's "Cemu 2.6". Verified all three paths (suffix / no suffix / no version) compile to the right string; unversioned local builds still report the commit hash.
 - Public-repo hygiene audit (these docs are public): no username, home paths, emails, employer, hostnames, IPs, tokens, game dumps or title keys anywhere in claude/ or the README. Only `~/Projects/Cemu-perf/` as a capture-path convention. Commit identity is the personal domain, not the work address.
-- Tagged v2.6-perf1 at 161dcc7 and pushed. Release run 33107279206 SUCCEEDED (27m37s, all 16 steps green): the version-assert step confirms the binary really reports "Cemu 2.6-perf1", the AppImage built fine despite appimage.sh's pinned library sonames, and both artifacts uploaded -- `cemu-2.6-perf1-linux-x64.zip` (33.6 MB) and `Cemu-2.6-perf1-x86_64.AppImage` (62.9 MB). Cold vcpkg cache meant ~20 of those 27 minutes were spent building dependencies from source; later runs should be faster now the NuGet cache is warm.
-- The release is still a DRAFT by design. Publish with:
-  `gh release edit v2.6-perf1 --repo HritwikSinghal/Cemu --draft=false`
-- Cancelled the redundant Build check on 161dcc7 (its build-windows failure was already diagnosed). The Build check on b53cb27 (run 33107834364) was left running unwatched, so **the C7626 fix in 301177c is NOT yet confirmed green on MSVC** -- check that run's build-windows job before trusting the Windows build.
-- v2.6-perf1 was deliberately NOT retagged: it still points at 161dcc7, which predates the MSVC fix. The Linux artifacts are unaffected (byte-identical either way) -- this only changes which tree a downloader checks out. Retagging was gated on build-windows going green first, which never got verified this session.
+- HISTORY REWRITE: 26 fork commits plus the upstream merge became 10 logical commits replayed linearly onto 5ead580 -- one per change, with ten documentation commits collapsed into a single `docs:` commit. The merge commit is gone; `merge-base(patch, upstream/main)` is still 5ead580, so future syncs are unaffected. Built in an isolated worktree and verified BEFORE applying: identical tree hash (18ccd63) and a byte-identical `git diff 5ead580..` against the old branch.
+- Rewrite technique worth reusing: recompose by staging file contents per logical group, not by hunk-splitting. Files touched by exactly one group take their final state; the three touched by two groups (LatteCommandProcessor.cpp, LatteIndices.cpp, VKRMemoryManager.h) take a real historical blob in the earlier commit, so no intermediate state is synthesized. Group order must preserve each shared file's chronological order. Confirmed mechanically that every instrumentation identifier used by the historical call sites still exists in the final header.
+- Every fork sha cited in these notes was remapped to the new commits; the pre-rewrite shas are unreachable and were removed rather than annotated. `patch-prerewrite` is a local-only backup ref at the old tip.
+- Released v2.6-perf2 (run 33159982801, 29m32s, all 14 steps green, published live rather than drafted): `cemu-2.6-perf2-linux-x64.zip` (32 MB) + `Cemu-2.6-perf2-x86_64.AppImage` (60 MB). The version-assert step confirms the binary reports "Cemu 2.6-perf2". A warm NuGet cache did NOT shorten the run much -- the vcpkg Configure step still dominated at ~25 of the 29 minutes, so budget ~30 min per release regardless.
+- Compile coverage for what shipped: the release job built Linux x64 green, and the identical source tree had already passed all seven Build check jobs (incl. Windows/MSVC and macOS). The Build check triggered by this push was cancelled, so there is no green Build check run against e19754b itself -- the source tree, not the run, is the evidence.
 - NEXT (perf work resumes, unchanged from 2026-07-27):
   1. `INTEL_MEASURE=type=render` at 1440p -- per-renderpass attribution of the ~19ms. The decision-maker for the next code change (profiling.md 3.3).
   2. `sudo intel_gpu_top` clock/power check (profiling.md 3.1). turbostat still NOT installed.
   3. Re-capture a persistent 1440p baseline to ~/Projects/Cemu-perf/ before any A/B claim.
-  Release loose ends (none blocking perf work): (a) publish the v2.6-perf1 draft when ready; (b) read run 33107834364's build-windows result -- it aborts at the first error, so C7626 may have been masking more MSVC-only issues; (c) only once Windows is green, decide whether to retag v2.6-perf1 or let the fix ship as v2.6-perf2.
+  Only open release item: the AppImage self-update target still points at upstream's CI channel (see todo.md).

@@ -1,39 +1,58 @@
 # Cemu -- Todo
 
 ## Notes & Conventions
-- Fresh session: read the LATEST dated entry in claude/progress.md -- it ends with the current next actions. Repo-level durable facts are in the root CLAUDE.md. How to measure anything + all baseline numbers: claude/profiling.md.
-- GOAL (revised 2026-07-26 after the resolution experiment): Zelda BOTW locked 60fps at **1440p render resolution, upscaled to the 4K panel**. Native 4K60 is measured out of reach (needs ~3x pixel-cost cut) -- see claude/profiling.md section 2.2. Working branch: `patch`.
-- Fork context: df29fda fixed an ANV Xe3 device-loss (identity swizzle on framebuffer attachments) -- required just to boot BOTW on this GPU.
+- Fresh session: read the LATEST dated entry in claude/progress.md -- it ends with the current next actions. Repo-level durable facts are in the root CLAUDE.md. How to measure: claude/profiling.md. Per-topic detail lives in claude/workstreams/ -- open ONLY the file whose description matches the task; do not bulk-read them.
+- GOAL (revised 2026-08-29): Zelda BOTW at a locked, stutter-free 60fps at the user's CURRENT settings (3200x1800 render, Draw Distance pack at Ultra, output to the 3840x2160 panel). The earlier "increase draw distance further" goal is set aside. Native 4K60 was measured out of reach in 2026-07 and remains so. Working branch: `patch`.
+- CURRENT GAP (measured 2026-08-29): ~34-35fps, steady, 84-88% GPU-bound. Needs a ~1.75x GPU-work cut. Full budget in claude/workstreams/botw-frame-budget.md.
+- Fork context: 7385b18 fixed an ANV Xe3 device-loss (identity swizzle on framebuffer attachments) -- required just to boot BOTW on this GPU.
 - Profiling build: `cmake -S . -B build-prof -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCEMU_CXX_FLAGS="-fno-omit-frame-pointer" -DCMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO=OFF -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -G Ninja`
 - All GX2->Vulkan emulation runs on ONE host thread ("LatteThread", src/Cafe/HW/Latte/Core/LatteThread.cpp:117). Overlay debug stats: VulkanRenderer::AppendOverlayDebugInfo (VulkanRenderer.cpp:3911).
-- CAPTURE HYGIENE: never write CEMU_PERFSTATS_CSV to /tmp -- the 2026-07-26 reboot destroyed both baseline captures, so only the aggregates in claude/profiling.md survive. Use ~/Projects/Cemu-perf/ with resolution in the filename, and walk the SAME route in every capture of a comparison set.
+- CAPTURE HYGIENE: never write CEMU_PERFSTATS_CSV to /tmp -- the 2026-07-26 reboot destroyed both baseline captures. Use ~/Projects/Cemu-perf/ with the variable under test in the filename. **STAND STILL**: as of 2026-08-29, free-roam captures are banned for A/B -- two 7k-10k-frame free-roam captures could not resolve a 1-2ms effect because within-bucket variance was 8ms. Fixed viewpoint at a heavy vista, ~60s, ONE variable changed. Also fix the display mode: output configuration is itself a performance variable (claude/workstreams/display-output-cost.md).
 - Analysis tool: `python3 claude/tools/analyze_perfstats.py <capture.csv> [more.csv ...]` -- per-file summary plus, for 2+ files, the draw-count-bucketed like-for-like table. Compare via that table, never via per-capture means (scene mix dominates).
 - UPSTREAM SYNC: the `upstream` remote (cemu-project/Cemu) was added 2026-08-28; `origin` is the fork. Local `main` tracks the FORK's main, so it does NOT advance on its own -- always `git fetch upstream` and diff against `upstream/main`, never against local `main`.
 - RELEASES: fork releases are Linux-x64-only, via `.github/workflows/deploy_fork_release.yml`, triggered by pushing a `vMAJOR.MINOR-perfN` tag; it builds, then PUBLISHES the release immediately -- there is no draft gate, so the tag push is the point of no return. What keeps a bad artifact from going public is that every guard (tag regex, the version assert against the built binary, zip packaging) fails the job before the publish step, which is last. The inherited `deploy_release.yml` + `determine_release_version.yml` pair CANNOT work on a fork (bumps the newest tag from the releases API, exits 1 when there are none, and rejects the -perfN suffix) -- do not try to use it. Fork builds must set EMULATOR_VERSION_SUFFIX or they report the same version string as upstream.
-- CI SCOPE: build_check.yml builds Linux x64/arm + macOS x86_64/arm64 + Windows. Windows/MSVC is far stricter than the local clang build and has already caught a portability bug clang accepts (C7626 on an unnamed typedef struct with a member function, 301177c). After touching a widely-included header, check the build-windows job specifically -- and note it stops at the FIRST error, so one green-looking fix may reveal more.
-- MEASURED VERDICT (do not re-litigate without new data): heavy scenes are GPU-bound at both 4K and 1440p; all 15 CPU stage timers together are ~7ms/frame and hidden under gpuWait. CPU-side work (register dirty-flag scheme, first-draw costs) is therefore DEPRIORITIZED until the GPU side is broken.
+- HISTORY SHAPE: `git log upstream/main..patch` is the entire fork -- one logical commit per change, with all documentation churn in a single `docs:` commit. Keep it that way: squash doc-only commits before pushing instead of accumulating them. A rewrite invalidates every fork sha, so sha citations in these files must be remapped afterwards.
+- CI SCOPE: build_check.yml builds Linux x64/arm + macOS x86_64/arm64 + Windows. Windows/MSVC is far stricter than the local clang build and has already caught a portability bug clang accepts (C7626 on an unnamed typedef struct with a member function, b3922b6). After touching a widely-included header, check the build-windows job specifically -- and note it stops at the FIRST error, so one green-looking fix may reveal more.
+- MEASURED VERDICT (do not re-litigate without new data): GPU-bound at every resolution tested, reconfirmed 2026-08-29 at the current settings (GPU busy 84-88% of frametime). All 15 CPU stage timers together are ~8ms/frame and hidden under 13-15.5ms of gpuWait. CPU-side work (register dirty-flag scheme, first-draw costs, texture decode-into-staging) is DEPRIORITIZED until the GPU side is broken.
+- THIRD MEASURED VERDICT (2026-08-29): there is NO time-based degradation. The user's report that BOTW
+  "is smooth for ~1 minute then drops" is entirely SCENE COMPLEXITY, not warm-up, residency growth, cache
+  fragmentation or a leak. Binned botw-1800p-after.csv (10688 frames, 288s wall) by wall time: bin 0-15s
+  runs 58fps at 462 draws/frame; bin 15-30s runs 38fps at 4722 draws/frame. The step is draw count going
+  ~10x, and it is fully REVERSIBLE -- at t=270s a 1872-draw frame returns to 50.6fps and at t=285s a
+  99-draw frame returns to a locked 60fps. Like-for-like drift test (same draw-count bucket, first third
+  vs last third of the capture): frametime +1.7%/+2.2%, gpuBusy +3.5%/+2.5%, textureHashUs +1.0%/+9.5%
+  -- all within the draw-count difference between the two groups. So the per-frame texture-hash scan over
+  all live textures does NOT grow into a problem, and neither does anything else. Do not go hunting for a
+  growth bug. Scripts: scratchpad timeline.py / drift.py (regenerate from claude/tools if needed).
+- SECOND MEASURED VERDICT (2026-08-29): this is a STEADY-SLOWNESS problem, not a stutter problem. Genuine hitches are 0.12-0.22% of frames and the worst ones are guest-side CPU stalls (idleSpin), not renderer work. Do not spend effort on hitching unless the user reports it after fps is fixed.
+- BEWARE the instrumentation blind spot: gpuBusyUs brackets only Cemu's own command buffers. Compositor passes and display scanout contend for the same iGPU and the same LPDDR bandwidth and never appear in any column -- they inflate gpuBusyUs without being attributable to it. See claude/workstreams/display-output-cost.md.
 
-## Perf campaign: measurement (baselines DONE -- full results in claude/profiling.md section 2)
-- [x] 4K baseline (captured 2026-07-25, analyzed 2026-07-26): heavy scenes HARD GPU-BOUND -- 38.5ms frametime = 35.1ms GPU busy (91% util) + 3.4ms gap; gpuWait 25.6ms; all CPU stages 6.9ms.
-- [x] Resolution experiment at 1440p: heavy scenes ~26fps -> ~41-49fps, still GPU-bound. Like-for-like 33.4ms -> 18.9ms GPU busy for 2.25x fewer pixels => ~26ms pixel-scaled + ~7.3ms resolution-independent at 4K. Drove the 1440p60 goal change.
-- [ ] NEXT: power/clock check -- `sudo intel_gpu_top` during a heavy scene (recipe: profiling.md 3.1). Is the iGPU sustaining max clocks or frequency/power limited? A throttled 4K run would revise the 26/7.3 split. Needs `sudo pacman -S turbostat` (extra/turbostat 7.1.4-1) for the package power split (3.2).
-- [ ] NEXT: per-renderpass GPU attribution -- `INTEL_MEASURE=type=render,file=...` at 1440p (recipe: profiling.md 3.3). Free, no install. Decides between shadow/AO pack reduction, the occlusion-query renderpass-split fix, and the fp16 spike. Also cross-checks whether query WAIT_BIT stalls inflate our gpuBusy number.
-- [ ] Optional, time-boxed: iaprof per-shader GPU flame graphs (profiling.md 3.4). Box prereqs all verified OK; Xe3 support and the Vulkan/ANV path are the open unknowns. Only after INTEL_MEASURE.
-- [ ] Re-capture a 1440p baseline to a persistent path before any A/B claim (the originals were lost to the /tmp wipe).
-- [ ] Confirm FPS++ pack enabled and shadow/AO pack settings noted (shadow/AO resolution reduction is a candidate GPU-load lever, and at 1440p the resolution-independent cost is 39% of the budget)
-- [ ] Vsync experiment: FIFO vs MAILBOX vs Immediate -- LOW PRIORITY, captures show a smooth GPU-bound equilibrium, not a FIFO halving pattern
-- [ ] User visual check still pending: no geometry corruption from the index cache (f94bcd1/f073d28)
+## Perf campaign: measurement
+- [x] 4K + 1440p baselines (2026-07-25/26). Superseded as the reference by the 2026-08-29 captures at the
+      real target settings, but the P/F derivation still comes from them -- claude/workstreams/botw-frame-budget.md
+- [x] Baseline at the ACTUAL target settings (2026-08-29): ~34-35fps steady, 84-88% GPU-bound, hitches
+      0.1-0.2%. Raw CSVs at ~/Projects/Cemu-perf/botw-1800p-{before,after}.csv (these ones survived).
+- [ ] NEXT #1, free: settle the display-output tax -- claude/workstreams/display-output-cost.md
+- [ ] NEXT #2: resolution ladder at current settings, standing still, at a fixed display mode --
+      claude/workstreams/botw-frame-budget.md
+- [ ] Power/clock check: `sudo intel_gpu_top` during a heavy scene (profiling.md 3.1). A throttled run
+      would revise the P/F split. `turbostat` still NOT installed (extra/turbostat) for the power split.
+- [ ] Per-renderpass attribution: `INTEL_MEASURE=type=render,file=...` (profiling.md 3.3). Free, no install.
+      Would independently cross-check where the GPU time actually goes.
+- [ ] Optional, time-boxed: iaprof per-shader GPU flame graphs (profiling.md 3.4). Box prereqs verified OK;
+      Xe3 support and the Vulkan/ANV path are the open unknowns. Only after INTEL_MEASURE.
+- [ ] Vsync experiment: FIFO vs MAILBOX vs Immediate -- LOW PRIORITY, captures show a smooth GPU-bound
+      equilibrium, not a FIFO halving pattern.
+- [ ] User visual check STILL pending: no geometry corruption from the index cache (a7e2adb).
 
 ## Upstream sync + fork releases (2026-08-28)
 - [x] Added the `upstream` remote and reviewed all 12 commits in 3005cb7..upstream/main (2026-07-18 -> 2026-08-21). None perf-related; only 50b9e4b (fence errors -> UnrecoverableError) matters here, and it is now merged.
-- [x] Merged upstream/main into `patch` (87c0099). Only VulkanRenderer.cpp overlapped; hunks did not collide.
-- [x] Fixed the long-red build-windows job: MSVC C7626 on the unnamed `performanceMonitor_t` typedef struct (301177c). Linux/macOS were always green, which is why it went unnoticed.
-- [x] EMULATOR_VERSION_SUFFIX CMake cache var so fork builds report "Cemu 2.6-perf1" (e8d3f7c).
-- [x] Linux-only fork release workflow (161dcc7); tagged and pushed v2.6-perf1.
-- [x] v2.6-perf1 release run built cleanly (33107279206, 27m37s, all steps green): version assert passed, AppImage built, both artifacts uploaded -- zip 33.6 MB + AppImage 62.9 MB.
-- [ ] PUBLISH the draft: `gh release edit v2.6-perf1 --repo HritwikSinghal/Cemu --draft=false` (created as a draft on purpose; nothing is public until this runs).
-- [ ] Read run 33107834364's build-windows job -- left running unwatched, so the C7626 fix is NOT yet confirmed on MSVC. build-windows aborts at the first error, so it may expose further MSVC-only issues.
-- [ ] Only after Windows is green: decide whether to retag v2.6-perf1 (currently at 161dcc7, which predates the fix) or let it ship as v2.6-perf2. Linux artifacts are byte-identical either way; this only affects the tree a downloader gets.
+- [x] Merged upstream/main into `patch`; only VulkanRenderer.cpp overlapped and the hunks did not collide.
+- [x] Fixed the long-red build-windows job: MSVC C7626 on the unnamed `performanceMonitor_t` typedef struct (b3922b6). Linux/macOS were always green, which is why it went unnoticed. All seven Build check jobs pass on this source tree.
+- [x] EMULATOR_VERSION_SUFFIX CMake cache var so fork builds report "Cemu 2.6-perfN" instead of being indistinguishable from upstream's "Cemu 2.6" (49042fe).
+- [x] Linux-only fork release workflow (08a89cb), publishing directly on a `v*-perf*` tag push rather than drafting (e19754b).
+- [x] Recomposed the fork into 10 logical commits replayed linearly onto upstream 5ead580, verified byte-identical (tree 18ccd63) before and after.
+- [x] RELEASED v2.6-perf2, live at https://github.com/HritwikSinghal/Cemu/releases/tag/v2.6-perf2 -- run 33159982801, 29m32s, all 14 steps green including the version assert. Artifacts: `cemu-2.6-perf2-linux-x64.zip` (32 MB) + `Cemu-2.6-perf2-x86_64.AppImage` (60 MB). Only tag on the remote; there are no other releases.
 - [ ] Consider overriding the AppImage self-update target: `dist/linux/appimage.sh` hardcodes `UPD_INFO=gh-releases-zsync|cemu-project|Cemu|ci|...`, so letting the AppImage update itself replaces the fork build with an upstream CI build. Currently only called out in the release notes; a real fix means patching the shared script (adds upstream merge-conflict surface).
 
 ## Perf campaign: instrumentation (IMPLEMENTED 2026-07-25)
@@ -41,18 +60,62 @@
 - [x] Per-stage CPU timers + event counters on the Latte thread: 15 timers / 18 counters in performanceMonitor.bottleneck (LattePerformanceMonitor.h), call sites across Latte core + Vulkan draw path
 - [x] Runtime toggle: collection gated on g_lattePerfStatsEnabled = overlay debug checkbox (Options > General > Graphics > Overlay > Debug) OR active CSV dump; single-branch cost when off
 - [x] Per-frame CSV dump: set CEMU_PERFSTATS_CSV=/path/file.csv env var (forces collection on, one row per frame, header included)
+- [x] `hostAllocUs` / `hostAllocs` (2026-08-29, committed 8dacb00): times and counts mid-frame synchronous device
+  allocations on the LatteThread -- the staging ring grower and both chunked-heap growers
+  (VKRMemoryManager.cpp allocateAdditionalUploadBuffer / VkTextureChunkedHeap::allocateNewChunk /
+  VkBufferChunkedHeap::allocateNewChunk). This is the ONLY column that separates a hitch from steady
+  slowness: previously a ring growth hid inside textureUploadUs (or uniformUs, depending on which path
+  triggered it), indistinguishable from ordinary work. Also on the overlay panel. CSV gained two columns at
+  the END of the row, so older captures still parse (the analyzer uses DictReader and skips missing keys).
+- [x] Analyzer hitch section (2026-08-29, committed 8dacb00): `analyze_perfstats.py` gained a per-spike section, deliberately
+  separate from the slowest-5% table -- that table averages, and averaging is exactly what hides a hitch.
+  Threshold is 2x the capture's own mean with a 33.3ms floor, and each spike is blamed on whichever stage
+  timer is furthest above its own median. Validated against a synthetic capture with planted spikes.
 - [ ] Optional flagship: Tracy integration (CPU zones + Vulkan GPU context) -- only if overlay/CSV prove insufficient. NOTE: low value while GPU-bound; Tracy would sharpen CPU attribution we already know is ~7ms/frame.
-- How to read the overlay panel: "SeqEnd tex/ctxReg" = sequence-break causes (validates dirty-flag thesis); "IdxCache hit/miss" = index cache effectiveness (2048-entry map since f94bcd1; measured 73-75% hit in-game); "Waits gpu/idleSpin/guestFence" = stall buckets; "GPU busy" vs frametime = GPU-bound vs CPU-bound (attribution caveat: claude/profiling.md section 1).
+- How to read the overlay panel: "SeqEnd tex/ctxReg" = sequence-break causes (validates dirty-flag thesis); "IdxCache hit/miss" = index cache effectiveness (2048-entry map since a7e2adb; measured 73-75% hit in-game); "Waits gpu/idleSpin/guestFence" = stall buckets; "GPU busy" vs frametime = GPU-bound vs CPU-bound (attribution caveat: claude/profiling.md section 1).
 - External tool recipes (INTEL_MEASURE, intel_gpu_top, turbostat, iaprof, perf) all live in claude/profiling.md section 3 -- do not re-research them.
 
 ## Perf campaign: optimization candidates (verify with profile first)
-PRIORITIZATION AFTER THE 2026-07-26 BASELINES: the measurements say GPU-side first. Rank candidates by
-whether they cut GPU work, not CPU work. Best-supported GPU levers right now:
-  (a) fp16/RelaxedPrecision emission in the decompiler (Tier 3 GPU research spike below) -- attacks the
-      ~26ms/11.6ms pixel-scaled cost directly, biggest lever, artifact-prone, opt-in only.
-  (b) occlusion-query renderpass splits + WAIT_BIT (Tier 2 below) -- attacks the ~7.3ms
-      resolution-independent cost, which is 39% of the budget at the new 1440p target.
-  (c) shadow/AO graphic-pack resolution reduction -- config-only, zero code, try it first.
+CEILING ARITHMETIC AT THE REAL TARGET SETTINGS (2026-08-29, from botw-1800p-after.csv, n=8156 heavy
+frames >=4000 draws, medians). ESTIMATED -- arithmetic on measured baselines, not itself measured.
+  Measured: frametime 29.60ms (p5 27.2 / p95 32.9) = 33.8fps; gpuBusy 28.13ms = 95% of frametime;
+  gpuWait 18.94ms; ALL TWELVE CPU stages together 5.57ms; 5521 draws/frame (1052 first-draws).
+  Split using the 3.15 ms/Mpx pixel slope from the 4K-vs-1440p two-point fit: at 1800p (5.76 Mpx)
+  pixel-scaled P ~= 18.1ms, fixed F ~= 10.0ms (36% of GPU time).
+  - EVERY CPU-side candidate has ceiling ~0. 5.57ms of CPU work sits inside 18.94ms of gpuWait; zeroing
+    all of it moves frametime by nothing. This kills the UMA zero-copy buffer cache, the register
+    dirty-flag scheme, first-draw hashing, texture decode-into-staging, AND the Eden ANV memory-type
+    change below -- not because the mechanisms are wrong but because the critical path does not run
+    through them. Do not re-propose any of them while gpuWait exceeds the CPU total.
+  - 60fps needs gpuBusy <= ~15.5ms. With F = 10.0ms the pixel budget is ~5.5ms = ~1.75 Mpx = ~1770x990.
+  - **FSR ALONE DOES NOT REACH 60fps AT DRAW DISTANCE ULTRA.** Render 1440p -> P 11.6 + F 10.0 + FSR pass
+    ~1.5 = ~23ms (43fps). Render 1080p -> P 6.5 + F 10.0 + ~1.5 = ~18ms (~55fps). F must come down too,
+    and F is bought by the 5521 draws/frame that Draw Distance Ultra exists to produce. This is the
+    central tension of the campaign; surface it to the user rather than quietly shipping soft output.
+  - ORDER IS SET BY THE NOISE FLOOR, NOT BY SIZE. The 2026-08-29 control test (same build, two free-roam
+    captures) produced per-bucket deltas up to 8.6ms. Only a >=10ms effect is resolvable with that
+    harness, which is FSR at an aggressive render resolution and nothing else. VRS (4-7ms) and fp16
+    (2-4ms) are UNMEASURABLE until the stationary fixed-viewpoint workload exists. Build the workload
+    before building either.
+
+PRIORITIZATION AS OF 2026-08-29 (supersedes the 2026-07-26 ranking). GPU-side first; rank by whether a
+candidate cuts GPU work, not CPU work. All four below were scoped by agent survey on 2026-08-29 with
+file:line blueprints; two of the load-bearing claims were adversarially refuted and survived.
+  (a) occlusion-query WAIT_BIT removal -- BUILT, A/B REFUTED IT, REVERTED 2026-08-29. Do not re-propose
+      without a stationary A/B showing a win. See Tier 2 below.
+  (b) FSR1 upscale filter -- biggest lever, because it makes render resolution independently reducible.
+      ~180 LOC for an EASU-only first commit. See the FSR section below.
+  (c) VRS 2x2 via dynamic state -- attacks P, est. 4-7ms at 1800p. See the VRS section below.
+  (d) fp16 -- biggest artifact risk, do last, opt-in. See the fp16 section below.
+DEMOTED: shadow/AO graphic-pack reduction was previously ranked "config-only, free, try it first". It is
+much weaker than that reads. Shadow maps do NOT scale with $width/$height (Graphics/rules.txt:1161-1194
+multiply by $shadowRes only), the user is already at Medium = stock, and the whole shadow atlas is
+~0.55 Mpx depth-only against a 5.76 Mpx colour target. Dropping to Low removes ~0.41 Mpx of depth raster.
+Shadow SAMPLING in the main pass is screen-resolution-bound and barely moves with $shadowRes.
+ALSO DEAD: the "Shadow Draw Distance" pack category does nothing at all in installed pack version 7 --
+$shadowNearbyStart/$shadowNearbyEnd/$shadowFarStart/$shadowFarEnd are declared (Graphics/rules.txt:24-27)
+and written by all five presets (:569-607) but referenced by no shader, no [TextureRedefine] and no .asm.
+Every preset in that category costs zero. Verified by grep across the whole graphicPacks tree.
 Everything under "first-draw"/"per-draw CPU" is CPU-side and parked (see Notes & Conventions verdict).
 - [ ] UMA zero-copy buffer cache: vertex/attr uploads double-copy (memcpy -> staging ring -> vkCmdCopyBuffer -> m_bufferCache created with flags 0; VulkanRenderer.cpp:3834,3837). Direct host-visible write or the disabled host-import path (:3822). Needs hazard handling for in-flight reads.
 - [ ] Texture hash cost: LatteTexture_CalculateTextureDataHash samples every live texture's guest memory every frame (LatteTextureCache.cpp:42)
@@ -61,21 +124,96 @@ Everything under "first-draw"/"per-draw CPU" is CPU-side and parked (see Notes &
 - [ ] Async-compile warm-up: interpreter fallback when heavy scenes hit fresh code (PPCRecompiler.cpp:453 worker polls 10ms); test PPCREC_FORCE_SYNCHRONOUS_COMPILATION
 - [ ] GX2DrawDone forces full sync unconditionally on Vulkan (GX2_Event.cpp:221) -- measure what honoring gx2drawdone_sync=false would save (correctness risk, experiment only)
 
+## Stutter (frame SPIKES) -- distinct from low average fps (2026-08-29)
+Low fps and stutter are different problems with different causes, and the GPU-bound verdict above is
+about fps only. A spike is a mid-frame synchronous device allocation on the LatteThread. Measured on
+this box, not inferred. `hostAllocUs`/`hostAllocs` (added 2026-08-29) isolate the top two; before that
+they hid inside whichever stage triggered the growth.
+- [ ] #1 Staging ring growth -- MEASURED mean 2.98ms, MAX 23.1ms. `allocateAdditionalUploadBuffer`
+  (VKRMemoryManager.cpp:24-49) does vkCreateBuffer + vkAllocateMemory + vkMapMemory for 32 MiB
+  synchronously mid-frame, from AllocateBufferMemory (:105). One occurrence turns a 16ms frame into
+  39ms. Fix direction: pre-grow at load, grow off-thread, or grow in larger steps less often.
+- [ ] #2 Texture heap chunk growth -- MEASURED mean 4.7ms, max 9.3ms, 128 MiB per chunk
+  (VKRMemoryManager.cpp:261). Worse on OOM: `imageMemoryAllocate` (:588-600) deletes up to 20 textures
+  per retry round and each is re-decoded on next use, spreading one OOM over several frames.
+- [ ] #3 Synchronous SHADER compile on the LatteThread -- `LatteShader_CreateRendererShader(..., false)`
+  (LatteShader.cpp:876, :899, :930). NOTE: `async_compile` does NOT cover this; it only covers pipeline
+  objects. Lands in shaderUpdateUs.
+- [ ] #4 Synchronous pipeline compile when `IsAsyncPipelineAllowed` is false (VulkanRendererCore.cpp:188-210,
+  compile at :262-264). Lands in pipelineUs.
+- [ ] #5 BOTW 83-slice array reload -- `_botwLargeTexHax` (LatteTextureCache.cpp:234-246) forces a change
+  verdict; LatteTexture_ReloadData re-decodes every slice of every mip: ~42 MB, 83 staging reservations,
+  83 renderpass splits in one frame. Also the likeliest trigger of #1.
+- [ ] #6 GX2DrawDone full drain -- steady per-frame sync rather than a spike; reads as baseline latency.
+- RULED OUT as already bounded (do not re-survey): texture cache eviction (explicit cap of 10 deletes/frame,
+  LatteTextureCache.cpp:371-397), buffer cache cleanup (one range per call, LatteBufferCache.cpp:1733-1770),
+  index cache invalidateAll (predicate-clear of a <=2048-entry map, microseconds).
+- POSSIBLE NON-EMULATOR STUTTER SOURCE: the Draw Distance graphic pack's patch_DrawDistance.asm:16 nops
+  0x03857F58, commented "Force the draw distance used for load balancing normally to be enabled". If that
+  is BOTW's own adaptive draw-distance relief valve, the pack removes the game's load-shedding exactly
+  where the budget is tightest. INFERENCE from the patch comment, not verified against game code. It also
+  means "pack off" is NOT equivalent to "pack on with presets lowered" -- an A/B must toggle the pack.
+
+## Reference codebase: Eden (2026-08-29)
+
+Eden (Switch emulator, yuzu/suyu lineage, GPL-3.0) is cloned at `~/Projects/eden` @ 54cd5fb8eb and is
+INDEXED for claude-context semantic search (`mcp__claude-context__search_code`, path
+`/home/hritwik/Projects/eden`; `externals/`, `LICENSES/`, `dist/` excluded from the index but present on
+disk). Different bottleneck profile from ours -- most of their headline perf commits are dynarmic (ARM
+JIT), buffer-cache sync and shader-cache work, none of which touch a GPU-bound iGPU frame. Three things
+transfer, one of which the ceiling gate kills:
+- [ ] **Real fp16 mechanism -- REDIRECTS [[fp16-shader-precision]].** Eden does NOT use mediump /
+  RelaxedPrecision. `src/video_core/host_shaders/fidelityfx_fsr.frag:8` uses
+  `#extension GL_EXT_shader_explicit_arithmetic_types : require` plus AMD's `A_HALF` path, i.e. genuine
+  `float16_t` types that glslang lowers to real SPIR-V Float16 ops. Our workstream currently records
+  "mediump is a no-op on ANV, use spirv-opt"; explicit arithmetic types are a third route that needs no
+  post-pass. Verify glslang in-tree accepts the extension (we compile GLSL->SPIR-V at runtime,
+  RendererShaderVk.cpp:303-371) before committing to the spirv-opt plan.
+- [ ] **FSR 1.0 working reference for [[fsr-upscale-filter]].** `src/video_core/fsr.cpp` (152 lines) is
+  the CPU-side constant generation (`FsrEasuCon`/`FsrEasuConOffset`/`FsrRcasCon` reimplemented to avoid
+  AMD's header warnings, incl. the 512-entry fp32->fp16 `AU1_AH1_AF1` table); shaders are
+  `vulkan_fidelityfx_fsr_easu_{fp16,fp32}.frag` + `_rcas_` selecting into `fidelityfx_fsr.frag`, which
+  `#include`s AMD's `ffx_a.h` / `ffx_fsr1.h` from `externals/FidelityFX-FSR/ffx-fsr/`. They pass the four
+  `uvec4` constants by PUSH CONSTANT, not UBO. Our decision to write a self-contained single-file GLSL
+  port still stands (Cemu has no shader include model), but port FROM this rather than from AMD's raw
+  headers. NOTE the licence step-up: Eden's own files are GPL-3.0 and Cemu is MPL-2.0 -- take the code
+  from AMD's MIT-licensed FidelityFX headers, NOT from Eden's GPL wrappers.
+- [~] **ANV HOST_CACHED stream buffers -- DECLINED BY THE CEILING GATE, do not build.** Eden 978d9d935d
+  adds `VK_MEMORY_PROPERTY_HOST_CACHED_BIT` to `preferredFlags` for `MemoryUsage::Stream` when
+  `GetDriverID() == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA` ("MESA will do memcpy() if not marked as host
+  cached"). Exactly our driver, and tempting. But it targets CPU-side upload cost, and our upload stages
+  measure textureUploadUs 0.000ms / uniformUs 0.454ms / bufferSyncUs 0.949ms inside 18.94ms of gpuWait
+  -- ceiling ~0. Revisit ONLY if the GPU side is broken first and uploads then land on the critical path.
+- Not applicable, checked: Eden has no VK_KHR_fragment_shading_rate usage, so [[vrs-fragment-shading-rate]]
+  gets no reference implementation from them. Their `frame_gen/` is a Lossless-Scaling DLL bridge
+  (Windows-only, proprietary DLL), not a portable frame generator.
+
 ## Perf campaign: round-2 candidates (2026-07-25, 5-agent survey)
 Cross-cutting: any texture or context-register change ends the current "draw sequence" (LatteCommandProcessor.cpp:1041-1052,1119-1129), so in BOTW most draws take the slow first-draw path. Several items below share that trigger -- a register-write dirty-flag scheme would amortize descriptor/pipeline/uniform/FBO recomputation together.
 
 ### Tier 1 (high impact, low risk)
-- [x] Index cache (DONE f94bcd1): persistent robin_hood map (2048-entry cap, insert-time sweep, sampled validation hash on hits since explicit invalidation only ever covered the immediate-mode scratch buffer). Was 8 slots / ~0% hit rate.
-- [x] Texture upload zero-fill (DONE 72d215d): buffer kept at high-water mark across uploads, 64 MiB release valve. Was full memset per upload.
-- [x] LatteThread busy-spin (DONE 4a10a44): consumer now blocks on a condvar signaled by TCLWriteCmd, bounded at 200us because emulated vsync is polled from that loop; IT_WAIT_REG_MEM loop pauses + throttles clock reads to every 64th iteration; producer full-ring wait yields after 4096 spins.
+- [x] Index cache (DONE a7e2adb): persistent robin_hood map (2048-entry cap, insert-time sweep, sampled validation hash on hits since explicit invalidation only ever covered the immediate-mode scratch buffer). Was 8 slots / ~0% hit rate.
+- [x] Texture upload zero-fill (DONE 3a562a2): buffer kept at high-water mark across uploads, 64 MiB release valve. Was full memset per upload.
+- [x] LatteThread busy-spin (DONE 3637d61): consumer now blocks on a condvar signaled by TCLWriteCmd, bounded at 200us because emulated vsync is polled from that loop; IT_WAIT_REG_MEM loop pauses + throttles clock reads to every 64th iteration; producer full-ring wait yields after 4096 spins.
 - [ ] Per-first-draw hashing: descriptor-set state hash computed 3x per first-draw (GetDescriptorSetStateHash, VulkanRendererCore.cpp:519-579; ds_cache map alone measured 1.71-3.16% of total CPU per note at VulkanRenderer.h:98-101) + full pipeline hash per first-draw with double robin_hood lookup (:46,:143-158) + minimal pipeline hash on EVERY fast draw (:1609). Fix: dirty-flag gating per state group.
 - [ ] Uniform re-assembly/upload per sequence-start with no change detection: full ALU-const bank memcpy + remapped-uniform scatter-gather (dozens-hundreds of 16-byte copies) + full ring upload on every first-draw (VulkanRendererCore.cpp:375-450, LatteBufferData.cpp:73-142); ring wrap can block on fence (:318-357). Incremental dirty-mask path exists (:452) but first-draw ignores it. Fix: extend dirty-mask to first-draws; content-hash to reuse previous ring offset.
 
 ### Tier 2
 - [ ] FBO fully re-derived from raw registers per draw-pass restart: UpdateCurrentFBO decodes up to 8 CBs + DB + up to 9 view-cache lookups (LatteRenderTarget.cpp:438,302,568) and restarts happen on any context-reg write, not just RT changes.
 - [ ] Full texture reload on any change: all mips x all slices re-decoded/re-uploaded, no partial path (LatteTextureLegacy.cpp:39-73); BOTW's 1024x1024x83-slice array workaround (LatteTextureCache.cpp:233,239) confirms the pattern. Fix: per-slice/mip dirty tracking via LatteTextureSliceMipInfo.
-- [ ] Texture upload double-copy: decoder writes CPU scratch, texture_loadSlice memcpys it again into staging (VulkanRenderer.cpp:3502-3520). Fix: decode directly into the staging allocation (UMA-friendly).
-- [ ] Occlusion queries: renderpass split on begin AND end + vkCmdCopyQueryPoolResults with VK_QUERY_RESULT_WAIT_BIT (GPU-side stall) + RequestSubmitSoon/OnIdle per query (VulkanQuery.cpp:53-93,137-138). Fix: in-renderpass queries where legal + availability-bit polling (throttled poll infra exists, LatteQuery.cpp:120-142).
+- [~] Texture upload double-copy -- INVESTIGATED 2026-08-29, verdict DO NOT BUILD. Real (decode into std::vector scratch at LatteTextureLoader.cpp:639,649, memcpy into staging at VulkanRenderer.cpp:3621-3623 -- the old :3502-3520 citation has drifted), and direct-decode is NOT a write-combined-scatter regression (staging is WC: measured read 0.08 GB/s vs write 84.65 GB/s on B390; but decoder writes are linear 64B cache-line-aligned runs, AddrLibFastDecode.h:115-168, and no decoder reads back from output). It still does not pay: textureUpload is ~2.2ms/frame against 25.6ms of gpuWait slack, so eliminating 100% of it changes frametime by zero while heavy scenes stay GPU-bound. It is also not a local edit -- staging is acquired in the renderer-agnostic loader, so it needs a new Renderer interface across Vulkan/OpenGL/Metal, plus moving the ring reservation ahead of AllocateOnHost. Mild adverse effect: holding the reservation across the decode lengthens ring occupancy, feeding the hitch source below. Revisit ONLY if the GPU side is broken first and textureUpload is then on the critical path.
+- [x] Occlusion queries -- IMPLEMENTED then REVERTED 2026-08-29 (A/B showed no win; user chose not to
+  carry sync-path risk for no measured gain). Diff preserved at
+  `~/Projects/Cemu-perf/occlusion-query-waitbit-removal.patch`. It removed the per-fragment
+  `vkCmdCopyQueryPoolResults` with `VK_QUERY_RESULT_WAIT_BIT` and read results on the host via
+  `vkGetQueryPoolResults`, gated on the existing command-buffer fence check at VulkanQuery.cpp:106, and
+  deleted the now-dead result buffer (VulkanRenderer.cpp:834, :899, VulkanRenderer.h:720). Full record,
+  including the Mesa mechanism analysis and the refuting numbers: claude/workstreams/occlusion-query-stalls.md.
+  - CORRECTION to the original entry: "in-renderpass queries" is NOT viable. Vulkan requires a query to begin and end within the same subpass OR both outside one; Cemu's query windows deliberately span whole renderpasses, so moving them inside forces re-fragmentation at every renderpass boundary -- strictly more resets and copies. BOTH `draw_endRenderPass` calls (VulkanQuery.cpp:58, :86) are load-bearing and are now commented as such. The begin-side split is required by `vkCmdResetQueryPool` (renderpass="outside" in the bundled vk.xml), the end-side by the begin/end symmetry rule.
+  - Availability-bit polling is also unnecessary: the fence gate is strictly stronger. Precedent already in tree at VulkanRenderer.cpp:2207 for the GPU timestamp pool.
+  - Mechanism (verified in the installed Mesa 26.1.4 source): for VK_QUERY_TYPE_OCCLUSION ANV emits ANV_PIPE_CS_STALL_BIT unconditionally (genX_query.c:1743), and WAIT_BIT adds an MI_SEMAPHORE_WAIT on the availability dword (genX_query.c:1766-1773) that only lands after the 3D pipeline drains. ~22 such drains per heavy frame, resolution-independent -- the shape of the measured F. Attribution of F to these drains is still an INFERENCE; the A/B capture is what settles it.
+  - Deviation from the scout's plan, deliberate: on VK_NOT_READY it falls back to a HOST-side wait rather than deferring the fragment. `LatteQuery_UpdateFinishedQueriesForceFinishAll` (LatteQuery.cpp:112-117) spins on an unbounded `while(true)` until every fragment resolves, so "retry next poll" would convert a driver spec violation into a hard Latte-thread hang.
+- [ ] Occlusion queries, maximal variant (NOT done): drop `RequestSubmitSoon()` at VulkanQuery.cpp:140 (it chops the command buffer within 10 draws of every query end, and each chop re-fragments every active query), and move the pool reset to host-side `vkResetQueryPool` via hostQueryReset. Watch cntSubmits/cntSubmitsForced/tmrGpuWait together; revert if tmrGpuWait rises more than cntSubmits falls.
 - [ ] Readback ForceFinish: force-submits the partial cmd buffer then vkWaitForFences(UINT64_MAX) on the Latte thread (TextureReadbackVk.cpp:150-154, VulkanRenderer.cpp:2300-2306; triggered from LatteCommandProcessor.cpp:1406,1714).
 - [ ] 1-frame-in-flight cap: SwapBuffer blocks on prev-frame fence + acquire fence (VulkanRenderer.cpp:3007-3010; m_maxQueued=1 SwapchainInfoVk.cpp:369) -- when GPU-bound, recording thread sits idle. Consider tunable 2-frames-in-flight (latency tradeoff).
 - [ ] Vsync pacing jitter: emulated 60Hz vsync polled only at CP boundaries; heavy frames get late/bursty ticks = microstutter (LatteTiming.cpp:156-175; accumulator LatteCommandProcessor.cpp:1517). Fix: dedicated timer thread. WARNING: VSync mode 3 (SYNC_AND_LIMIT) is broken on Linux -- sets host-driven flag but VsyncDriver is a Windows-only stub -> flip accounting freezes (LatteTiming.cpp:56-64, VsyncDriver.cpp:205). Current config uses MAILBOX (VSync=2) = safe; do not use mode 3.
@@ -89,23 +227,58 @@ Cross-cutting: any texture or context-register change ends the current "draw seq
 - [ ] Aux-hash walks VS+PS texture-unit registers every draw even on shader-cache hit (LatteShader.cpp:1066,598-660). Gate on texture-reg dirty flag.
 - [ ] Cache vkGetImageMemoryRequirements alignment on LatteTextureVk at creation; currently re-queried per slice upload with .size discarded (VulkanRenderer.cpp:3510-3514).
 - [ ] Fuse memcpy + hashPage passes in buffer-cache page upload (LatteBufferCache.cpp:1255-1272, in-code TODO).
-- [ ] GPU-side research spike: fp16/RelaxedPrecision emission -- zero precision qualifiers anywhere in the decompiler; big ALU+bandwidth win on iGPU but artifact-prone; opt-in mode only. Related: array-GPR shaders declare vec4[128] and zero-init all 128 regardless of use (LatteDecompilerEmitGLSL.cpp:3983-3997) -- size to actual gprUseMask.
+- [ ] GPU-side research spike: fp16/RelaxedPrecision emission -- SCOPED 2026-08-29, see the fp16 section below.
+- [ ] Array-GPR zero-init: array-GPR shaders declare vec4[128] and zero-init all 128 regardless of use
+  (LatteDecompilerEmitGLSL.cpp:3983-3996). The behavior is confirmed, but the previously recorded fix
+  ("size to actual gprUseMask") is WRONG and would introduce out-of-bounds writes: the array path is
+  entered only when `usesRelativeGPRWrite` (LatteDecompilerRegisterDataTypeTracker.cpp:21-23), and
+  gprUseMask is documented as ignoring relative-index accesses (LatteDecompilerInternal.h:237). The
+  analyzer only patches the mask for relative READS (LatteDecompilerAnalyzer.cpp:977-1013), never writes.
+  Correct bound is the shader's hardware GPR allocation (SQ_PGM_RESOURCES.NUM_GPRS). Separate spike;
+  unrelated to fp16.
 
 ### Spot-check additions (2026-07-25, main-agent read of draw path)
 - [ ] First-draw re-syncs ALL buffers unconditionally: draw_execute_first passes 0xFFFFFFFF dirty masks to LatteBufferCache_Sync (VulkanRendererCore.cpp:1436), so every attribute buffer and every uniform block in the shader's quickBufferList pays an interval-tree lookup + rebind per first-draw even when untouched (LatteBufferData.cpp:188-295; in-code TODO :279 confirms the skip opportunity). The incremental path also flips ALL attrib buffers dirty whenever maxIndex/maxInstance grows (:199-213). Same register-dirty-flag scheme as the other first-draw items would fix it.
 - [ ] Async-compile skipped draws still pay almost the full CPU path: pipeline validity is only checked at VulkanRendererCore.cpp:1443, AFTER streamout prep, 3x uniform upload, index decode+alloc+flush, buffer-cache sync, and pipeline hash/lookup. During compile-stutter windows Cemu burns near-full per-draw CPU on draws it then discards. Fix: hoist the pipeline lookup + VK_NULL_HANDLE check above the uniform/index/buffer work.
 
+## Workstreams (per-topic detail; bodies are NOT loaded at session start -- open only what matches)
+- [ ] display-output-cost -- ACTIVE, run first, zero code -- claude/workstreams/display-output-cost.md
+      Same settings are much smoother on the laptop panel than on the 4K/240Hz external. Four
+      compounding output-side costs, three fixable in one command. All 2026-08-29 baselines were
+      captured on the SLOW display, so this may be contaminating the measured F.
+- [ ] botw-frame-budget -- ACTIVE, blocked on the resolution ladder -- claude/workstreams/botw-frame-budget.md
+      The P/F cost model, measured baselines, target-settings budget, and the capture methodology.
+      Everything else is downstream of the ladder.
+- [ ] fsr-upscale-filter -- PAUSED, scoped, ~180 LOC first commit -- claude/workstreams/fsr-upscale-filter.md
+      Biggest lever. Render-below-output confirmed viable by adversarial refuter.
+- [ ] vrs-fragment-shading-rate -- PAUSED, scoped, est. 4-7ms -- claude/workstreams/vrs-fragment-shading-rate.md
+      Dynamic-state approach; pipeline hash and shader cache confirmed untouched by adversarial refuter.
+- [ ] fp16-shader-precision -- PAUSED, do last, highest artifact risk -- claude/workstreams/fp16-shader-precision.md
+      mediump + spirv-opt route verified on this machine; two corruption hazards reproduced.
+- [x] occlusion-query-stalls -- CLOSED, built then REVERTED (A/B showed no win) -- claude/workstreams/occlusion-query-stalls.md
+      One open item survives the revert: the latent HOST_COHERENT query-buffer bug it had also fixed is
+      back in tree. Listed under Upstream follow-ups.
+- [ ] frame-hitches -- PAUSED, instrumented then deprioritised by its own measurement -- claude/workstreams/frame-hitches.md
+      Hitches are 0.1-0.2% of frames. Not the problem. hostAllocUs instrumentation is worth keeping.
+
 ## Bug hunt findings (2026-07-25, /bugs on recent work; all majors verified by main agent; fixes landed same day)
-- [x] VulkanAPI.h loader-table fix committed (91aebca) -- fdbe9e9 did not compile without it; local clang build green
-- [x] TCL wake handshake StoreLoad race FIXED (d048d70): seq_cst fence pair added; fast paths still lock-free; in-code comment now describes the fence-based guarantee
-- [x] Index cache key now includes VGT_MULTI_PRIM_IB_RESET_INDX (f073d28); misleading cross-frame-persistence comments corrected (entries live one draw burst; invalidateAll fires per scanbuffer swap + CP starvation + retired cmdbuffer)
-- [x] Timer regression FIXED (7c57aca): bottleneck.* timers moved to new LattePerfNestingTimer, legacy LattePerfStatTimer restored to forgiving pre-715c8fa behavior (also moots the non-atomic depth concern); CSV now flushed per row; overlay GPU busy labeled "(retired)" with attribution caveat documented
-- [x] Texture upload valve hysteresis (d523041): trim check every 1024 releases, only if nothing in the window needed >64MiB
+- [x] VulkanAPI.h loader-table fix committed (b3922b6) -- b3922b6 did not compile without it; local clang build green
+- [x] TCL wake handshake StoreLoad race FIXED (3637d61): seq_cst fence pair added; fast paths still lock-free; in-code comment now describes the fence-based guarantee
+- [x] Index cache key now includes VGT_MULTI_PRIM_IB_RESET_INDX (a7e2adb); misleading cross-frame-persistence comments corrected (entries live one draw burst; invalidateAll fires per scanbuffer swap + CP starvation + retired cmdbuffer)
+- [x] Timer regression FIXED (b3922b6): bottleneck.* timers moved to new LattePerfNestingTimer, legacy LattePerfStatTimer restored to forgiving pre-b3922b6 behavior (also moots the non-atomic depth concern); CSV now flushed per row; overlay GPU busy labeled "(retired)" with attribution caveat documented
+- [x] Texture upload valve hysteresis (e2a6be9): trim check every 1024 releases, only if nothing in the window needed >64MiB
 - [ ] Measure IdxCache hit/miss in-game to quantify within-burst reuse before deciding whether gating the invalidateAll flushes is worth pursuing
 - [ ] STILL OPEN (deliberate): validation hash ~2KB sampling blind spots (LatteIndices.cpp) -- documented in-code, MUST be closed before ever unlocking cross-frame persistence; not fixed now because denser sampling costs per-hit CPU with zero benefit under the current flush regime
 
 ### Upstream follow-ups (not for this campaign)
-- [ ] MetalMemoryManager.h/.cpp has the identical texture-upload-buffer zero-fill bug fixed in VKRMemoryManager.h (72d215d) -- and its TextureUploadBufferRelease (~line 32) also clears unconditionally on every release, so the d523041 hysteresis valve applies there too if upstreaming
+- [ ] MetalMemoryManager.h/.cpp has the identical texture-upload-buffer zero-fill bug fixed in VKRMemoryManager.h (3a562a2) -- and its TextureUploadBufferRelease (~line 32) also clears unconditionally on every release, so the e2a6be9 hysteresis valve applies there too if upstreaming
+- [ ] Occlusion query result buffer can be read stale. VulkanRenderer.cpp:837's FALLBACK allocation asks
+  for DEVICE_LOCAL|HOST_VISIBLE|HOST_CACHED without HOST_COHERENT, and nothing calls
+  vkInvalidateMappedMemoryRanges before reading ptrQueryResults (VulkanQuery.cpp:108). An under-counted
+  occlusion result makes BOTW cull visible geometry -- silent and gameplay-visible. Inherited from
+  upstream; NOT reproduced here (B390/ANV takes the first allocation, so the fallback never runs). Minimal
+  fix: add HOST_COHERENT to the fallback flags, or invalidate before the read. Was fixed incidentally by
+  the reverted occlusion-query change; now stands alone.
 
 ### Verified already-efficient (do not re-survey)
 FetchShader lookup (O(1) L3 table + per-frame skip), shader-state selection (robin_hood on register state, no byte rehash per draw), SPIR-V disk cache + glslang optimizer enabled, buffer-cache interval tree, streamout setup, buffer-cache chronon rehash (PAC-MAN-only flag, inert for BOTW), LatteAsyncCommands_checkAndExecute (lock-free empty fast path, LatteAsyncCommands.cpp:124).
