@@ -13,6 +13,9 @@ name: Deploy fork release (Linux)
 #     fork does not ship or test.
 #
 # Living in its own file also means upstream merges never conflict with it.
+#
+# Pushing a matching tag publishes a live release with no review step, so every
+# check that guards artifact correctness must fail the job rather than warn.
 
 on:
   push:
@@ -35,7 +38,7 @@ env:
 
 jobs:
   release:
-    name: Build Linux x64 and draft release
+    name: Build Linux x64 and publish release
     runs-on: ubuntu-22.04
     steps:
       - name: Resolve tag and version
@@ -126,8 +129,10 @@ jobs:
 
       # Tolerated rather than fatal: appimage.sh pins exact library sonames
       # (libffi.so.7, libpcre.so.3, ...) that drift as the runner image is
-      # updated. The zip is the artifact that must exist; a missing AppImage is
-      # caught by a human because the release is created as a draft.
+      # updated, so a runner-image bump must not be able to block a release.
+      # The zip is the artifact that must exist. Because the release is
+      # published without review, a missing AppImage is announced in the
+      # release notes rather than left for a human to notice.
       - name: Build AppImage
         id: appimage
         continue-on-error: true
@@ -137,6 +142,7 @@ jobs:
           dist/linux/appimage.sh X64
 
       - name: Package artifacts
+        id: package
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           mkdir -p upload
@@ -147,7 +153,9 @@ jobs:
           rm -r "./Cemu_$VERSION"
           if compgen -G 'artifacts/Cemu-*-x86_64.AppImage' > /dev/null; then
             mv artifacts/Cemu-*-x86_64.AppImage "upload/Cemu-$VERSION-x86_64.AppImage"
+            echo "appimage=true" >> "$GITHUB_OUTPUT"
           else
+            echo "appimage=false" >> "$GITHUB_OUTPUT"
             echo "::warning::AppImage was not produced (appimage.sh outcome: ${{ steps.appimage.outcome }}); releasing the zip only"
           fi
           ls -la upload/
@@ -165,9 +173,14 @@ jobs:
             echo "with an upstream release. Linux x64 only -- for Windows or macOS use"
             echo "[upstream Cemu](https://github.com/cemu-project/Cemu/releases)."
             echo
-            echo "> Note: the AppImage inherits upstream's self-update target, so"
-            echo "> letting it update in place will replace this fork build with an"
-            echo "> upstream CI build. Re-download from here instead."
+            if [ "${{ steps.package.outputs.appimage }}" = "true" ]; then
+              echo "> Note: the AppImage inherits upstream's self-update target, so"
+              echo "> letting it update in place will replace this fork build with an"
+              echo "> upstream CI build. Re-download from here instead."
+            else
+              echo "> Note: the AppImage failed to build for this tag, so only the"
+              echo "> zip is attached. See the workflow run for the reason."
+            fi
             echo
             if [ -n "$PREV" ]; then
               echo "## Changes since $PREV"
@@ -182,12 +195,16 @@ jobs:
           } > notes.md
           cat notes.md
 
-      - name: Create draft release
+      # Published immediately rather than drafted. Everything that could ship a
+      # wrong or unusable artifact is gated by an earlier step that fails the
+      # job before this one runs: the tag regex, the version assert against the
+      # built binary, and the zip packaging. This step is last, so a failure
+      # anywhere above leaves no release behind at all.
+      - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "${{ steps.version.outputs.tag }}" \
-            --draft \
             --title "Cemu ${{ steps.version.outputs.version }}" \
             --notes-file notes.md \
             upload/*
