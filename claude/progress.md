@@ -87,7 +87,73 @@ No code changes this session -- documentation only, so a fresh session can act w
   3. Re-capture a persistent 1440p CSV baseline (the A/B reference for any future fix).
   Then pick from the prioritized GPU levers in todo.md: shadow/AO pack (free), occlusion-query renderpass splits (39% of the 1440p budget is resolution-independent), fp16 spike (biggest, riskiest).
 
-## 2026-08-28: upstream merge, linear fork history, v2.6-perf2 (RESUME HERE)
+## 2026-08-29: measured at the real target settings; several planned wins REFUTED (RESUME HERE)
+Per-topic detail now lives in `claude/workstreams/` -- this entry is the index, not the record.
+Open only the workstream matching the task; the SessionStart hook lists one manifest line each.
+
+GOAL RESTATED by the user: stutter-free locked 60fps at the CURRENT settings (3200x1800 render, Draw
+Distance pack at Ultra, 3840x2160 output). The "increase draw distance further" goal is set aside.
+
+WHAT THE MEASUREMENTS SAY (first captures ever taken at the real target settings; raw CSVs survive at
+~/Projects/Cemu-perf/botw-1800p-{before,after}.csv):
+- ~34-35fps, dead steady, 84-88% GPU-bound. 70-80% of frames miss 60fps but only 2.4% miss 30fps.
+- **This is a steady-slowness problem, NOT a stutter problem.** Genuine hitches are 0.12-0.22% of frames,
+  and the worst ones are guest-side CPU stalls (idleSpin, gpuBusy ~0.7ms on a 200ms frame), not renderer
+  work. Gap to 60fps is a ~1.75x GPU-work cut.
+
+THREE THINGS I PREDICTED OR CLAIMED THAT THE DATA REFUTED -- recorded so they are not re-proposed:
+1. The occlusion-query WAIT_BIT removal was predicted to drop gpuBusyUs. It did not; like-for-like by
+   draw bucket it is flat-to-slightly-worse. The mechanism argument (Vulkan spec, Mesa source, an in-tree
+   precedent) was sound and still did not predict reality. The 7.3ms attribution of resolution-independent
+   cost to query drains is UNSUPPORTED. Built green, then REVERTED -- the remaining case for it was
+   correctness cleanup on a load-bearing sync path, which does not justify the risk at zero measured gain.
+   Diff kept at ~/Projects/Cemu-perf/occlusion-query-waitbit-removal.patch. [[occlusion-query-stalls]]
+2. I called mid-frame staging-ring growth "your stutter" off a microbenchmark of the allocation. It fires
+   in 7 of 10568 frames (0.066%), six of them during warm-up. Severe when it fires, almost never fires
+   during play. [[frame-hitches]]
+3. I passed on a "2x faster" texture-staging benchmark with more weight than it deserved -- it used a
+   synthetic decode stand-in and does not transfer to a textureUploadUs ratio. The verdict (do not build)
+   stands but rests on ~2.2ms of CPU being hidden under 25.6ms of gpuWait, not on that benchmark.
+
+METHODOLOGY FAILURE WORTH REMEMBERING: the A/B was two free-roam captures (7322 and 10568 steady frames)
+of the same area. Different routes made them uncomparable -- draw-count bucketing controls content only
+roughly, and a within-capture control test produced per-bucket deltas of +0.4, -3.2, +5.0, +4.1, +0.4,
+-8.6, -0.1 ms. Free-roam A/B is now banned in todo.md: stand still, fixed viewpoint, one variable.
+
+USER OBSERVATION THAT MAY OUTWEIGH EVERYTHING ELSE HERE: the same settings run much smoother on the
+laptop panel than on the 4K external -- and every number above was captured on the external
+(AW3225QF at 3840x2160 @ 240Hz). Four compounding output-side costs, three fixable in one command, none
+of them visible to Cemu's own instrumentation. This may mean the derived F of ~10.4ms is partly display
+configuration rather than game cost. RUN THIS FIRST. [[display-output-cost]]
+
+ALSO BUILT, and COMMITTED as 8dacb00: `hostAllocUs`/`hostAllocs` instrumentation + an analyzer hitch
+section, kept as permanent diagnostic capability even though they deprioritised their own workstream.
+This is the only column that separates a hitch from steady slowness.
+
+TWO TRACKER ENTRIES CORRECTED IN PLACE: the array-GPR "size to gprUseMask" fix would cause out-of-bounds
+writes (gprUseMask ignores relative indexing, the only reason that code path exists) -- correct bound is
+SQ_PGM_RESOURCES.NUM_GPRS; and "shadow/AO reduction is a free config win" is much weaker than it read.
+The pack's entire "Shadow Draw Distance" category is inert in v7 -- nothing reads those variables.
+
+ADVERSARIAL VERIFICATION: two cold-start refuters were run. The VRS dynamic-state claim survived intact
+and the failure mode I hypothesised was itself refuted; the render-vs-output decoupling claim survived
+with one sub-clause corrected. Both recorded in their workstreams with the binding constraints.
+
+NEXT, in order:
+  1. [[display-output-cost]] -- free, one command, and it may reframe the budget.
+  2. [[botw-frame-budget]] -- resolution ladder, standing still, at a fixed display mode.
+  3. Then pick a code lever with real numbers: [[fsr-upscale-filter]] (biggest), then
+     [[vrs-fragment-shading-rate]], then [[fp16-shader-precision]] (last, highest artifact risk).
+  4. SETTLED 2026-08-29: [[occlusion-query-stalls]] was reverted and its workstream closed. One item
+     outlived it -- the latent HOST_COHERENT query-buffer bug it had incidentally fixed is back in tree
+     and is now tracked on its own under todo.md "Upstream follow-ups".
+  5. Still pending from 2026-07: user visual check for index-cache geometry corruption.
+
+WORKING TREE AT SESSION END: clean. 8dacb00 committed the hostAlloc instrumentation; the occlusion-query
+change was reverted; docs and the seven new claude/workstreams/ files committed alongside. Local clang
+build green after both the commit and the revert.
+
+## 2026-08-28: upstream merge, linear fork history, v2.6-perf2
 No perf work this session -- upstream sync, CI repair, release plumbing, history rewrite.
 - Added the real `upstream` remote (cemu-project/Cemu). None existed -- only `origin` (the fork) -- which is why local `main` looked current at the 3005cb7 branch point. Fetch it before assessing upstream drift.
 - Reviewed all 12 commits in `patch..upstream/main` (2026-07-18 -> 2026-08-21). NONE are performance changes; nothing touched the Latte core, Vulkan draw path, texture pipeline or shader decompiler, so no baseline or measured verdict is invalidated. The only one that matters here is 50b9e4b (fence errors raise UnrecoverableError instead of spamming the log) -- worth having because VK_ERROR_DEVICE_LOST is a live Xe3/ANV hazard. Rest: coreinit DynLoad callbacks, ExpHeap resize fix, PPC assembler, AArch64, CLI argstr, wayland-protocols in BUILD.md.

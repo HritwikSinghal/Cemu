@@ -51,3 +51,11 @@ Purpose: performance work targeting Intel integrated GPUs -- specifically Panthe
 - Build locally per BUILD.md; profiling build recipe is in `claude/todo.md`.
 - Perf changes need in-game verification (BOTW heavy scenes) plus before/after numbers
   from the overlay/CSV instrumentation before being considered done.
+
+## Long-Running Project
+
+This project uses session-persistent tracking in `claude/`. At the start of every session:
+1. Read `claude/todo.md` and `claude/progress.md` silently for a full catch-up -- do not ask the user to re-explain anything.
+2. Open a `claude/workstreams/<slug>.md` only when the task matches its manifest line. Do not bulk-read them.
+3. Do NOT automatically continue working -- wait for the user to indicate they want to proceed.
+4. After each completed task, update the tracker immediately: mark `[x]` in `claude/todo.md`, recount the Status Summary and rewrite `## Current state` in `claude/progress.md`, and record any topic detail in that topic's workstream file.
