@@ -35,14 +35,14 @@ STAGE_TIMERS = [
     "shaderUpdateUs", "fboUpdateUs", "textureUpdateUs", "textureHashUs",
     "textureUploadUs", "uniformUs", "indexUs", "bufferSyncUs", "pipelineUs",
     "descriptorSetsUs", "renderpassUs", "submitUs", "gpuWaitUs", "idleSpinUs",
-    "guestFenceUs",
+    "guestFenceUs", "hostAllocUs",
 ]
 
 COUNTERS = [
     "drawsFirst", "drawsFast", "seqEndTexture", "seqEndContextReg",
     "indexCacheHit", "indexCacheMiss", "pipelineMiss", "descSetMiss",
     "asyncSkippedDraws", "submits", "submitsForced", "occlusionQueries",
-    "textureReloads", "textureReloadSlices", "vsyncLateUs",
+    "textureReloads", "textureReloadSlices", "vsyncLateUs", "hostAllocs",
 ]
 
 BYTE_COUNTERS = ["bytesUniform", "bytesTexture", "bytesIndex"]
@@ -120,6 +120,42 @@ def summarize(path: str, rows: Rows) -> None:
     deltas = [(mean_of(slow, c) - mean_of(fast, c), c, mean_of(fast, c), mean_of(slow, c)) for c in cols]
     for d, c, fm, sm in sorted(deltas, reverse=True):
         print(f"{c:>20s} {fm:12.0f} {sm:12.0f} {d:+10.0f}")
+
+    hitches(rows, mft)
+
+
+def hitches(rows: Rows, mft: float, factor: float = 2.0, show: int = 12) -> None:
+    """Individual spike frames, attributed.
+
+    Deliberately separate from the slowest-5% table above: that table averages, and averaging is
+    what hides a hitch. One 200ms frame inside 3000 frames is invisible in every mean here and is
+    also the single most noticeable thing while playing. A hitch is defined relative to the
+    capture's own mean rather than an absolute threshold, so it stays meaningful whether the
+    capture sits at 60fps or 30fps.
+    """
+    threshold = max(mft * factor, 33333)
+    spikes = [r for r in rows if r["frameUs"] > threshold]
+    print(f"\n-- hitches (frames over {threshold / 1000:.1f}ms = {factor}x mean, floor 33.3ms) --")
+    if not spikes:
+        print("  none -- frametime is smooth; any slowness here is steady-state, not stutter")
+        return
+    worst = sum(r["frameUs"] for r in spikes) - int(mft) * len(spikes)
+    print(f"  {len(spikes)} of {len(rows)} frames ({100 * len(spikes) / len(rows):.2f}%),"
+          f" {worst / 1000:.0f}ms of excess frametime total")
+    # attribute each spike to whichever tracked stage is furthest above its own median
+    base = {t: st.median([r[t] for r in rows]) for t in STAGE_TIMERS if t in rows[0]}
+    blame: dict[str, int] = {}
+    for r in spikes:
+        stage, _ = max(((t, r[t] - m) for t, m in base.items()), key=lambda kv: kv[1])
+        blame[stage] = blame.get(stage, 0) + 1
+    print("  dominant stage (count):", ", ".join(
+        f"{s}={c}" for s, c in sorted(blame.items(), key=lambda kv: -kv[1])))
+    cols = [c for c in ["gpuBusyUs", "hostAllocUs", "hostAllocs", "textureUploadUs",
+                        "textureReloadSlices", "shaderUpdateUs", "pipelineUs", "gpuWaitUs"]
+            if c in rows[0]]
+    print(f"  {'frame':>8s} {'frameUs':>9s} " + " ".join(f"{c:>16s}" for c in cols))
+    for r in sorted(spikes, key=lambda r: -r["frameUs"])[:show]:
+        print(f"  {r['frame']:>8d} {r['frameUs']:>9d} " + " ".join(f"{r[c]:>16d}" for c in cols))
 
 
 def compare(captures: list[tuple[str, Rows]], bucket: int = 500, min_frames: int = 30) -> None:

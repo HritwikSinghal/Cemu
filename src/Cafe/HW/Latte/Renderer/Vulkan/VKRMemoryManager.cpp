@@ -1,5 +1,6 @@
 #include "Cafe/HW/Latte/Renderer/Vulkan/VKRMemoryManager.h"
 #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.h"
+#include "Cafe/HW/Latte/Core/LattePerformanceMonitor.h"
 #include <imgui.h>
 
 /* VKRSynchronizedMemoryBuffer */
@@ -23,6 +24,8 @@ void VKRSynchronizedRingAllocator::addUploadBufferSyncPoint(AllocatorBuffer_t& b
 
 void VKRSynchronizedRingAllocator::allocateAdditionalUploadBuffer(uint32 sizeRequiredForAlloc)
 {
+	LATTE_PERF_SCOPE(tmrHostAlloc);
+	LATTE_PERF_COUNT(cntHostAllocs);
 	// calculate buffer size, should be a multiple of bufferAllocSize that is at least as large as sizeRequiredForAlloc
 	uint32 bufferAllocSize = m_minimumBufferAllocSize;
 	while (bufferAllocSize < sizeRequiredForAlloc)
@@ -252,6 +255,8 @@ VkTextureChunkedHeap::~VkTextureChunkedHeap()
 
 uint32 VkTextureChunkedHeap::allocateNewChunk(uint32 chunkIndex, uint32 minimumAllocationSize)
 {
+	LATTE_PERF_SCOPE(tmrHostAlloc);
+	LATTE_PERF_COUNT(cntHostAllocs);
 	cemu_assert_debug(m_list_chunkInfo.size() == chunkIndex);
 	m_list_chunkInfo.resize(m_list_chunkInfo.size() + 1);
 
@@ -367,6 +372,8 @@ VkBufferChunkedHeap::~VkBufferChunkedHeap()
 
 uint32 VkBufferChunkedHeap::allocateNewChunk(uint32 chunkIndex, uint32 minimumAllocationSize)
 {
+	LATTE_PERF_SCOPE(tmrHostAlloc);
+	LATTE_PERF_COUNT(cntHostAllocs);
 	size_t allocationSize = std::max<size_t>(m_minimumBufferAllocationSize, minimumAllocationSize);
 	VKRBuffer* buffer = VKRBuffer::Create(m_bufferType, allocationSize, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 	if(!buffer)

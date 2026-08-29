@@ -235,7 +235,14 @@ struct performanceMonitor_t
 		LattePerfNestingTimer tmrGpuWait;          // CPU blocked on GPU fences (incl. present pacing waits)
 		LattePerfNestingTimer tmrIdleSpin;         // command processor starved (waiting for PM4 data)
 		LattePerfNestingTimer tmrFenceWait;        // guest fence waits (IT_WAIT_REG_MEM)
+		// mid-frame host/device memory growth on the LatteThread (staging ring buffers, texture and
+		// buffer heap chunks). These are rare but individually huge -- a single 32 MiB upload-buffer
+		// allocation was measured at up to 23ms on Panther Lake -- and without their own timer they hide
+		// inside whichever stage happened to trigger the growth (textureUpload, uniform, bufferSync...),
+		// indistinguishable from ordinary work. This is the column that separates a hitch from slowness.
+		LattePerfNestingTimer tmrHostAlloc;
 		// counters (latched at frame end)
+		LattePerfStatFrameCounter cntHostAllocs;       // number of the above allocations this frame
 		LattePerfStatFrameCounter cntDrawsFirst;
 		LattePerfStatFrameCounter cntDrawsFast;
 		LattePerfStatFrameCounter cntSeqEndTexture;    // draw sequences ended by a texture state change

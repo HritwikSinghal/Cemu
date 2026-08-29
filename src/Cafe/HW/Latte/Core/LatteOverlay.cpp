@@ -131,6 +131,9 @@ void LatteOverlay_renderOverlay(ImVec2& position, ImVec2& pivot, sint32 directio
 				ImGui::Text("IdxCache: %u hit / %u miss, dsMiss %u pipeMiss %u", cnt(bn.cntIndexCacheHit), cnt(bn.cntIndexCacheMiss), cnt(bn.cntDescSetMiss), cnt(bn.cntPipelineMiss));
 				ImGui::Text("Upload KB: unif %u tex %u idx %u, texReloads %u (%u slices)", cnt(bn.cntBytesUniformUpload) >> 10, cnt(bn.cntBytesTextureUpload) >> 10, cnt(bn.cntBytesIndexUpload) >> 10, cnt(bn.cntTextureReloads), cnt(bn.cntTextureReloadSlices));
 				ImGui::Text("Submits: %u (%u forced), occQ %u, vsyncLate %uus", cnt(bn.cntSubmits), cnt(bn.cntSubmitsForced), cnt(bn.cntOcclusionQueries), cnt(bn.cntVsyncLateUs));
+				// a non-zero hostAlloc is a hitch, not background noise: these are mid-frame device
+				// allocations on the Latte thread and a single one has been measured at over 20ms
+				ImGui::Text("HostAlloc: %u us (%u allocs)", tUs(bn.tmrHostAlloc), cnt(bn.cntHostAllocs));
 				// backend specific info
 				g_renderer->AppendOverlayDebugInfo();
 			}
