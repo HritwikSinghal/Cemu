@@ -36,7 +36,9 @@ static void LattePerformanceMonitor_bottleneckFrameEnd()
 	bn.tmrGpuWait.frameFinished();
 	bn.tmrIdleSpin.frameFinished();
 	bn.tmrFenceWait.frameFinished();
+	bn.tmrHostAlloc.frameFinished();
 	// latch counters
+	bn.cntHostAllocs.frameFinished();
 	bn.cntDrawsFirst.frameFinished();
 	bn.cntDrawsFast.frameFinished();
 	bn.cntSeqEndTexture.frameFinished();
@@ -83,6 +85,7 @@ static void LattePerformanceMonitor_bottleneckFrameEnd()
 			<< ',' << bn.cntTextureReloads.getPreviousFrameValue() << ',' << bn.cntTextureReloadSlices.getPreviousFrameValue()
 			<< ',' << bn.cntBytesUniformUpload.getPreviousFrameValue() << ',' << bn.cntBytesTextureUpload.getPreviousFrameValue()
 			<< ',' << bn.cntBytesIndexUpload.getPreviousFrameValue() << ',' << bn.cntVsyncLateUs.getPreviousFrameValue()
+			<< ',' << tUs(bn.tmrHostAlloc) << ',' << bn.cntHostAllocs.getPreviousFrameValue()
 			<< '\n';
 		// flush every row (one per frame while profiling) so a crash or forced kill doesn't lose the whole dump
 		s_perfCSV.flush();
@@ -218,7 +221,7 @@ void LattePerformanceMonitor_frameBegin()
 			s_perfCSV.open(csvPath, std::ios::out | std::ios::trunc);
 			s_perfCSVActive = s_perfCSV.is_open();
 			if (s_perfCSVActive)
-				s_perfCSV << "frame,frameUs,gpuBusyUs,shaderUpdateUs,fboUpdateUs,textureUpdateUs,textureHashUs,textureUploadUs,uniformUs,indexUs,bufferSyncUs,pipelineUs,descriptorSetsUs,renderpassUs,submitUs,gpuWaitUs,idleSpinUs,guestFenceUs,drawsFirst,drawsFast,seqEndTexture,seqEndContextReg,indexCacheHit,indexCacheMiss,pipelineMiss,descSetMiss,asyncSkippedDraws,submits,submitsForced,occlusionQueries,textureReloads,textureReloadSlices,bytesUniform,bytesTexture,bytesIndex,vsyncLateUs\n";
+				s_perfCSV << "frame,frameUs,gpuBusyUs,shaderUpdateUs,fboUpdateUs,textureUpdateUs,textureHashUs,textureUploadUs,uniformUs,indexUs,bufferSyncUs,pipelineUs,descriptorSetsUs,renderpassUs,submitUs,gpuWaitUs,idleSpinUs,guestFenceUs,drawsFirst,drawsFast,seqEndTexture,seqEndContextReg,indexCacheHit,indexCacheMiss,pipelineMiss,descSetMiss,asyncSkippedDraws,submits,submitsForced,occlusionQueries,textureReloads,textureReloadSlices,bytesUniform,bytesTexture,bytesIndex,vsyncLateUs,hostAllocUs,hostAllocs\n";
 		}
 	}
 	// runtime toggle: collect stats while the debug overlay is shown or a CSV dump is running
